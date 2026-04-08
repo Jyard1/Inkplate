@@ -1,0 +1,22 @@
+# Rust build artifacts
+/target
+**/*.rs.bk
+Cargo.lock.bak
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local scratch space
+/scratch
+/samples/out
+*.inkplate.bak
+
+# Note: Cargo.lock IS committed — inkplate ships a binary, so we want
+# reproducible CI builds across all contributors and CI runners.

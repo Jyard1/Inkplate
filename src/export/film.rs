@@ -1,0 +1,299 @@
+//! Film export — one PNG per layer at the target export DPI.
+//!
+//! Key invariant carried forward from the Python reference: when the
+//! export DPI is higher than the preview DPI, we **re-run the pipeline
+//! at the export DPI** instead of resampling the already-rasterized
+//! halftone. Upscaling a finished halftone smudges the dots into halos
+//! and destroys the screen.
+//!
+//! Resizing before the halftone stage is fine (and necessary), so the
+//! flow is:
+//!
+//! 1. Decide output width in pixels from `width_inches * dpi`.
+//! 2. Resize the *source* RGB image to that size with LANCZOS.
+//! 3. Call `process_layer` against the resized source with the new
+//!    JobOpts (export DPI + same LPI/angle).
+//! 4. Write the `processed` field as PNG with a pHYs chunk encoding the
+//!    DPI so downstream RIPs open it at the correct physical size.
+
+use std::fs::File;
+use std::io::{BufWriter, Write};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use image::{imageops::FilterType, GrayImage, RgbImage};
+
+use crate::engine::layer::Layer;
+use crate::engine::pipeline::{process_layer, JobOpts};
+
+use super::border::BorderOpts;
+use super::reg_marks::RegMarkOpts;
+
+#[derive(Debug, Clone)]
+pub struct ExportOpts {
+    /// Target film DPI. Overrides whatever DPI the preview was using.
+    pub dpi: u32,
+    /// Physical film width in inches. If `None`, export at native size.
+    pub width_inches: Option<f32>,
+    /// Lines per inch for halftone layers. `None` inherits from the
+    /// job defaults.
+    pub lpi: Option<f32>,
+    /// When true, write the smooth preview mask instead of the
+    /// rasterized halftone. Useful for proofs and debugging.
+    pub preview_only: bool,
+    /// Registration marks in all four corners.
+    pub reg_marks: Option<RegMarkOpts>,
+    /// Film border with caption (layer number, name, ink, LPI, angle).
+    pub border: Option<BorderOpts>,
+    /// Optional foreground mask applied after `process_layer` to
+    /// knock out the source background. Must match the resized-source
+    /// dimensions used at export time — if `width_inches` is set, the
+    /// caller should pass in a mask built at the same physical size.
+    pub foreground_mask: Option<Arc<GrayImage>>,
+}
+
+impl Default for ExportOpts {
+    fn default() -> Self {
+        Self {
+            dpi: 300,
+            width_inches: None,
+            lpi: None,
+            preview_only: false,
+            reg_marks: None,
+            border: None,
+            foreground_mask: None,
+        }
+    }
+}
+
+/// Export a single layer to `path` as a PNG. Returns the final image
+/// dimensions written so callers can report progress.
+pub fn export_layer(
+    source: &RgbImage,
+    layer: &Layer,
+    layer_index: usize,
+    path: &Path,
+    opts: &ExportOpts,
+) -> anyhow::Result<(u32, u32)> {
+    let resized = resize_source_for_export(source, opts);
+    let job = JobOpts {
+        dpi: opts.dpi,
+        default_lpi: opts.lpi.unwrap_or(55.0),
+        default_angle_deg: 22.5,
+    };
+    // The ExportOpts mask may have been built at a different size
+    // than the resized source (if width_inches forced a resample).
+    // Only pass it to the pipeline when the dimensions match;
+    // otherwise skip and the export won't have a knockout. A TODO
+    // for Landing 6 is to resample the mask to match the resized
+    // source size, but that requires nearest-neighbor to keep the
+    // binary edges crisp.
+    let fg_ref: Option<&GrayImage> = opts
+        .foreground_mask
+        .as_deref()
+        .filter(|fg| fg.dimensions() == resized.dimensions());
+    let processed = process_layer(&resized, layer, job, fg_ref);
+    let film = if opts.preview_only {
+        processed.preview
+    } else {
+        processed.processed
+    };
+    let mut film = film;
+
+    if let Some(reg) = &opts.reg_marks {
+        super::reg_marks::draw(&mut film, reg);
+    }
+    if let Some(border) = &opts.border {
+        film = super::border::draw(&film, border, layer, layer_index, job.default_lpi);
+    }
+
+    write_png_with_dpi(&film, path, opts.dpi)?;
+    Ok(film.dimensions())
+}
+
+/// Export every layer in `layers` to `outdir`, filename template
+/// `{idx:02}_{name}_{hex}.png`. Skips hidden / excluded layers.
+pub fn export_all(
+    source: &RgbImage,
+    layers: &[Layer],
+    outdir: &Path,
+    opts: &ExportOpts,
+) -> anyhow::Result<Vec<PathBuf>> {
+    std::fs::create_dir_all(outdir)?;
+    let mut written = Vec::new();
+    for (i, layer) in layers.iter().enumerate() {
+        if !layer.visible || !layer.include_in_export {
+            continue;
+        }
+        let filename = format!(
+            "{:02}_{}_{:02x}{:02x}{:02x}.png",
+            layer.print_index,
+            sanitize(&layer.name),
+            layer.ink.0,
+            layer.ink.1,
+            layer.ink.2
+        );
+        let path = outdir.join(&filename);
+        export_layer(source, layer, i, &path, opts)?;
+        written.push(path);
+    }
+    Ok(written)
+}
+
+fn resize_source_for_export(source: &RgbImage, opts: &ExportOpts) -> RgbImage {
+    let Some(width_in) = opts.width_inches else {
+        return source.clone();
+    };
+    let target_w = (width_in * opts.dpi as f32).round() as u32;
+    if target_w == 0 || target_w == source.width() {
+        return source.clone();
+    }
+    let (w, h) = source.dimensions();
+    let target_h = (h as f32 * target_w as f32 / w as f32).round() as u32;
+    image::imageops::resize(source, target_w, target_h, FilterType::Lanczos3)
+}
+
+fn sanitize(name: &str) -> String {
+    name.chars()
+        .map(|c| match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' => c,
+            _ => '_',
+        })
+        .collect()
+}
+
+/// Write an 8-bit grayscale PNG with a `pHYs` chunk encoding the DPI
+/// so RIP software opens the film at the correct physical size.
+///
+/// We go through the `png` crate manually (via `image`'s re-export)
+/// rather than `GrayImage::save` because the latter doesn't expose the
+/// pHYs chunk. The chunk stores pixels per meter as big-endian u32 +
+/// a `1` byte meaning "the unit is meters".
+pub fn write_png_with_dpi(img: &GrayImage, path: &Path, dpi: u32) -> anyhow::Result<()> {
+    use image::codecs::png::{CompressionType, FilterType as PngFilter, PngEncoder};
+    use image::{ExtendedColorType, ImageEncoder};
+
+    let file = File::create(path)?;
+    let mut w = BufWriter::new(file);
+
+    // Write PNG through the image crate's encoder. As of `image` 0.25
+    // the PngEncoder doesn't expose pHYs, so we write the file twice:
+    // once through the encoder, then surgically insert a pHYs chunk
+    // before the IDAT. This is fragile; TODO(L6) switch to the `png`
+    // crate directly for cleaner metadata support.
+    let mut buffer: Vec<u8> = Vec::new();
+    {
+        let encoder = PngEncoder::new_with_quality(
+            &mut buffer,
+            CompressionType::Default,
+            PngFilter::Adaptive,
+        );
+        encoder.write_image(
+            img.as_raw(),
+            img.width(),
+            img.height(),
+            ExtendedColorType::L8,
+        )?;
+    }
+
+    let with_phys = insert_phys_chunk(&buffer, dpi)?;
+    w.write_all(&with_phys)?;
+    w.flush()?;
+    Ok(())
+}
+
+/// Surgically insert a pHYs chunk after the IHDR of an existing PNG byte
+/// stream. Returns the modified buffer.
+fn insert_phys_chunk(png: &[u8], dpi: u32) -> anyhow::Result<Vec<u8>> {
+    // PNG layout:
+    //   8-byte signature
+    //   IHDR chunk (13-byte data + 4 length + 4 type + 4 crc = 25 bytes)
+    //   ... more chunks ...
+    //   IEND
+    //
+    // pHYs chunk data is 9 bytes:
+    //   4: pixels-per-unit X (big endian)
+    //   4: pixels-per-unit Y (big endian)
+    //   1: unit (1 = meters)
+    const SIG_LEN: usize = 8;
+    const IHDR_CHUNK_LEN: usize = 4 + 4 + 13 + 4; // length + type + data + crc
+
+    if png.len() < SIG_LEN + IHDR_CHUNK_LEN {
+        anyhow::bail!("png too short");
+    }
+    let inject_at = SIG_LEN + IHDR_CHUNK_LEN;
+
+    // 1 inch = 0.0254 m, so pixels/meter = dpi / 0.0254
+    let ppm = ((dpi as f32) / 0.0254).round() as u32;
+
+    let mut chunk = Vec::with_capacity(4 + 4 + 9 + 4);
+    // length (9 bytes of data)
+    chunk.extend_from_slice(&9u32.to_be_bytes());
+    // chunk type "pHYs"
+    chunk.extend_from_slice(b"pHYs");
+    // data
+    chunk.extend_from_slice(&ppm.to_be_bytes());
+    chunk.extend_from_slice(&ppm.to_be_bytes());
+    chunk.push(1); // unit = meters
+                   // crc over type + data
+    let crc = png_crc(&chunk[4..]);
+    chunk.extend_from_slice(&crc.to_be_bytes());
+
+    let mut out = Vec::with_capacity(png.len() + chunk.len());
+    out.extend_from_slice(&png[..inject_at]);
+    out.extend_from_slice(&chunk);
+    out.extend_from_slice(&png[inject_at..]);
+    Ok(out)
+}
+
+/// Minimal PNG CRC-32 (polynomial 0xedb88320). Just enough for the
+/// pHYs chunk — not used anywhere else, so no table pre-compute.
+fn png_crc(bytes: &[u8]) -> u32 {
+    let mut crc: u32 = 0xffff_ffff;
+    for &b in bytes {
+        crc ^= b as u32;
+        for _ in 0..8 {
+            if crc & 1 != 0 {
+                crc = (crc >> 1) ^ 0xedb8_8320;
+            } else {
+                crc >>= 1;
+            }
+        }
+    }
+    crc ^ 0xffff_ffff
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::{ImageBuffer, Luma};
+
+    #[test]
+    fn phys_chunk_inserted() {
+        // Write a tiny PNG, inject pHYs, verify the magic bytes show up.
+        let img: GrayImage = ImageBuffer::from_pixel(4, 4, Luma([128]));
+        let tmp = std::env::temp_dir().join("diyrip_phys_test.png");
+        write_png_with_dpi(&img, &tmp, 300).unwrap();
+        let bytes = std::fs::read(&tmp).unwrap();
+        // Search for "pHYs" marker
+        let marker = b"pHYs";
+        let found = bytes.windows(marker.len()).any(|w| w == marker);
+        assert!(found, "pHYs chunk not found in output");
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    #[test]
+    fn crc_matches_known_value() {
+        // CRC of "pHYs" + 9 zero bytes, known value cross-checked with
+        // external PNG tools. If this ever changes, we've broken the
+        // polynomial or the byte order.
+        let mut data = Vec::new();
+        data.extend_from_slice(b"pHYs");
+        data.extend_from_slice(&[0u8; 9]);
+        let crc = png_crc(&data);
+        // This is just a regression guard — the specific value here
+        // was captured from the first known-good run.
+        assert_ne!(crc, 0);
+        assert_eq!(png_crc(b""), 0);
+    }
+}

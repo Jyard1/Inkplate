@@ -1,0 +1,19 @@
+# Force LF line endings for all text files in the repo so cross-platform
+# contributors don't fight `core.autocrlf` and fmt-check stays stable in CI.
+* text=auto eol=lf
+
+# Binary types: never touch line endings.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.tif binary
+*.tiff binary
+*.bmp binary
+*.ico binary
+*.ttf binary
+*.otf binary
+*.woff binary
+*.woff2 binary
+*.zip binary
+*.gz binary

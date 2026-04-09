@@ -1,3 +1,5 @@
+**THIS IS AI SLOP(claude code)**
+
 # Inkplate
 
 A screen-printing color separation tool built around a **continuous-tone

@@ -1,4 +1,4 @@
-#**THIS IS AI SLOP(claude code)**
+**THIS IS AI SLOP(claude code)**
 
 # Inkplate
 

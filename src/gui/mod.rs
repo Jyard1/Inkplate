@@ -10,11 +10,13 @@
 use eframe::egui;
 
 mod app;
+mod history;
 mod panels;
 mod processing;
 mod state;
 mod textures;
 mod widgets;
+mod worker;
 
 pub use app::InkplateApp;
 
@@ -30,6 +32,6 @@ pub fn run() -> eframe::Result<()> {
     eframe::run_native(
         "Inkplate",
         options,
-        Box::new(|_cc| Ok(Box::new(InkplateApp::default()))),
+        Box::new(|cc| Ok(Box::new(InkplateApp::new(cc.egui_ctx.clone())))),
     )
 }

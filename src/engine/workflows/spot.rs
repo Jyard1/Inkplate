@@ -45,7 +45,12 @@ impl Default for SpotOpts {
             max_colors: 16,
             merge_delta_e: 8.0,
             min_coverage: 0.002,
-            consolidate_hues: true,
+            // Off by default — the new k-means palette already gives
+            // well-separated clusters, and merging them after the
+            // fact throws away colors the user explicitly asked for.
+            // Users who want shadow+highlight of the same ink on one
+            // plate can flip this in the GUI.
+            consolidate_hues: false,
             smooth_radius: 0,
         }
     }
@@ -81,6 +86,8 @@ pub fn build(source: &RgbImage, opts: SpotOpts) -> Vec<Layer> {
     let all_targets: Vec<_> = palette.iter().map(|e| e.rgb).collect();
     let empty_others: Vec<_> = Vec::new();
 
+    let zero_weights: Vec<f32> = vec![0.0; all_targets.len()];
+
     let mut layers = Vec::with_capacity(palette.len());
     for (idx, entry) in palette.iter().enumerate() {
         let mut layer = Layer::new_spot(entry.rgb);
@@ -96,6 +103,7 @@ pub fn build(source: &RgbImage, opts: SpotOpts) -> Vec<Layer> {
             aa_full: 1.5,
             aa_end: 14.0,
             aa_reach: 2,
+            target_weights: zero_weights.clone(),
         };
         layer.render_mode = RenderMode::Solid;
         layer.tone = Tone::default();

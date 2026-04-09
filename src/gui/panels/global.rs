@@ -114,10 +114,16 @@ pub fn show(ui: &mut Ui, state: &mut GuiState) -> Action {
             ui.set_width(160.0);
             let prev = state.workflow_opts.max_colors as u32;
             let mut mc = prev;
-            labeled_slider_u32(ui, "Max palette colors", &mut mc, 2..=24);
+            labeled_slider_u32(ui, "Max palette colors", &mut mc, 2..=48);
             if mc != prev {
                 state.workflow_opts.max_colors = mc as usize;
             }
+            ui.checkbox(&mut state.workflow_opts.consolidate_hues, "Merge same hue")
+                .on_hover_text(
+                    "Collapse shades of the same hue (e.g. bright red + blood red) \
+                     onto a single plate. Off by default — leave this on only if you \
+                     actually want shadow/highlight variants merged into one ink.",
+                );
         });
         ui.vertical(|ui| {
             ui.set_width(160.0);

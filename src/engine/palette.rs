@@ -364,11 +364,12 @@ pub struct HueOpts {
 impl Default for HueOpts {
     fn default() -> Self {
         Self {
-            // 25° is wide enough to catch "bright red" and "blood red"
-            // as the same family (their hue angles can drift by ~15°
-            // in LAB as lightness changes) while still keeping red vs
-            // orange and cyan vs teal as separate groups.
-            hue_tolerance_deg: 25.0,
+            // 10° is tight enough that "red" and "orange-red" stay
+            // on separate plates, but loose enough that a bright red
+            // and its shadow (both around hue 25-30°) merge into one
+            // ink. An earlier version used 25° and was collapsing
+            // genuinely distinct hues into the same family.
+            hue_tolerance_deg: 10.0,
             gray_chroma: 6.0,
         }
     }

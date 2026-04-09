@@ -12,7 +12,9 @@
 use eframe::egui::{self, Ui};
 
 use crate::gui::state::GuiState;
-use crate::gui::widgets::{ink_picker, labeled_slider_f32, labeled_slider_u32, labeled_slider_u8};
+use crate::gui::widgets::{
+    curve_editor, ink_picker, labeled_slider_f32, labeled_slider_u32, labeled_slider_u8,
+};
 use inkplate::engine::halftone::{DotShape, HalftoneCurve};
 use inkplate::engine::layer::{
     ColorRangeFalloff, EdgeMode, Extractor, IndexDitherKind, RenderMode,
@@ -82,7 +84,7 @@ pub fn show(ui: &mut Ui, state: &mut GuiState) -> bool {
                     }
 
                     ui.add_space(4.0);
-                    if extractor_form(ui, &mut layer.extractor) {
+                    if extractor_form(ui, &mut layer.extractor, layer.ink) {
                         changed = true;
                     }
                 });
@@ -101,17 +103,28 @@ pub fn show(ui: &mut Ui, state: &mut GuiState) -> bool {
                     if layer.tone.choke != prev_c {
                         changed = true;
                     }
-                    // TODO(L5-later): replace with a proper curve editor
-                    // widget. For now the curve stays whatever the
-                    // workflow preset set.
                     ui.label(
-                        egui::RichText::new(format!(
-                            "curve: {} points (editor coming later)",
-                            layer.tone.curve.len()
-                        ))
-                        .italics()
-                        .size(11.0),
+                        egui::RichText::new(format!("curve: {} points", layer.tone.curve.len()))
+                            .size(11.0),
                     );
+                    ui.label(
+                        egui::RichText::new(
+                            "drag handles to edit · double-click to add · right-click to delete",
+                        )
+                        .italics()
+                        .size(10.0)
+                        .color(egui::Color32::from_gray(140)),
+                    );
+                    if curve_editor(ui, &mut layer.tone.curve) {
+                        changed = true;
+                    }
+                    if ui.button("Reset curve").clicked() {
+                        layer.tone.curve = vec![
+                            inkplate::engine::tone::CurvePoint::new(0, 0),
+                            inkplate::engine::tone::CurvePoint::new(255, 255),
+                        ];
+                        changed = true;
+                    }
                 });
 
             // ------------------- Mask shape -------------------
@@ -260,7 +273,11 @@ pub fn show(ui: &mut Ui, state: &mut GuiState) -> bool {
 // Extractor forms
 // ---------------------------------------------------------------------------
 
-fn extractor_form(ui: &mut Ui, extractor: &mut Extractor) -> bool {
+fn extractor_form(
+    ui: &mut Ui,
+    extractor: &mut Extractor,
+    layer_ink: inkplate::engine::color::Rgb,
+) -> bool {
     let mut changed = false;
     match extractor {
         Extractor::SpotSolid { target, tolerance } => {
@@ -274,25 +291,55 @@ fn extractor_form(ui: &mut Ui, extractor: &mut Extractor) -> bool {
             }
         }
         Extractor::SpotAa {
-            aa_full,
-            aa_end,
-            aa_reach,
+            targets,
+            target_weights,
             ..
         } => {
-            let prev = *aa_full;
-            labeled_slider_f32(ui, "AA full (ΔE)", aa_full, 0.0..=20.0);
-            if (*aa_full - prev).abs() > 1e-4 {
-                changed = true;
+            // Look up which target this layer owns (by matching ink)
+            // so the Reach slider edits the right slot in the shared
+            // weights vec. If the ink drifted off every target, we
+            // just show a disabled hint.
+            let my_idx = targets.iter().position(|c| *c == layer_ink);
+
+            // Lazy-expand the weights vec if the project was saved
+            // with a SpotAa extractor from before target_weights
+            // existed. `#[serde(default)]` gives an empty vec in
+            // that case; pad with zeros so indices line up.
+            if target_weights.len() != targets.len() {
+                target_weights.clear();
+                target_weights.resize(targets.len(), 0.0);
             }
-            let prev = *aa_end;
-            labeled_slider_f32(ui, "AA end (ΔE)", aa_end, 0.0..=40.0);
-            if (*aa_end - prev).abs() > 1e-4 {
-                changed = true;
-            }
-            let prev = *aa_reach;
-            labeled_slider_u32(ui, "AA reach (px)", aa_reach, 0..=8);
-            if *aa_reach != prev {
-                changed = true;
+
+            ui.label(
+                egui::RichText::new(
+                    "Reach nudges this plate's effective CIE94 distance. \
+                     Higher = the plate steals pixels from its neighbours; \
+                     lower (or negative) = it gives them up. Use it when \
+                     the automatic Voronoi misassigns shaded regions.",
+                )
+                .italics()
+                .size(10.0)
+                .color(egui::Color32::from_gray(140)),
+            );
+
+            if let Some(idx) = my_idx {
+                let prev = target_weights[idx];
+                let mut val = prev;
+                labeled_slider_f32(ui, "Reach", &mut val, -30.0..=30.0);
+                if (val - prev).abs() > 1e-4 {
+                    target_weights[idx] = val;
+                    changed = true;
+                }
+                if ui.button("Reset reach").clicked() && target_weights[idx] != 0.0 {
+                    target_weights[idx] = 0.0;
+                    changed = true;
+                }
+            } else {
+                ui.label(
+                    egui::RichText::new("(layer ink is not in the targets list)")
+                        .italics()
+                        .size(10.0),
+                );
             }
         }
         Extractor::ColorRange {
@@ -424,8 +471,33 @@ fn extractor_form(ui: &mut Ui, extractor: &mut Extractor) -> bool {
                 changed = true;
             }
         }
-        Extractor::ManualPaint => {
-            ui.label(egui::RichText::new("Manual paint layers are not editable yet.").italics());
+        Extractor::ManualPaint { buf } => {
+            ui.label(
+                egui::RichText::new(
+                    "Click-drag on the preview (when this layer is selected in Layer view) \
+                     to paint into the mask. Use the brush controls in the preview panel \
+                     for size and mode.",
+                )
+                .italics()
+                .size(11.0),
+            );
+            if let Some(b) = buf {
+                ui.label(
+                    egui::RichText::new(format!("buffer: {}×{}", b.width, b.height))
+                        .size(11.0),
+                );
+                if ui.button("Clear strokes").clicked() {
+                    *buf = Some(inkplate::engine::layer::ManualPaintBuf::blank(
+                        b.width, b.height,
+                    ));
+                    changed = true;
+                }
+            } else {
+                ui.label(
+                    egui::RichText::new("buffer: (empty — will be allocated on first stroke)")
+                        .size(11.0),
+                );
+            }
         }
     }
     changed
@@ -474,7 +546,7 @@ fn extractor_tag(e: &Extractor) -> Tag {
         Extractor::ChannelCalc { .. } => Tag::ChannelCalc,
         Extractor::LuminanceThreshold { .. } => Tag::LuminanceThreshold,
         Extractor::IndexAssignment { .. } => Tag::IndexAssignment,
-        Extractor::ManualPaint => Tag::ManualPaint,
+        Extractor::ManualPaint { .. } => Tag::ManualPaint,
     }
 }
 
@@ -505,6 +577,7 @@ fn default_extractor(t: Tag, ink: inkplate::engine::color::Rgb) -> Extractor {
             aa_full: 4.0,
             aa_end: 14.0,
             aa_reach: 2,
+            target_weights: vec![0.0],
         },
         Tag::ColorRange => Extractor::ColorRange {
             target: ink,
@@ -533,7 +606,7 @@ fn default_extractor(t: Tag, ink: inkplate::engine::color::Rgb) -> Extractor {
             index: 0,
             dither: IndexDitherKind::Fs,
         },
-        Tag::ManualPaint => Extractor::ManualPaint,
+        Tag::ManualPaint => Extractor::ManualPaint { buf: None },
     }
 }
 

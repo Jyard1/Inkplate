@@ -51,6 +51,7 @@ pub fn run_extractor(source: &RgbImage, layer: &Layer) -> GrayImage {
             aa_full,
             aa_end,
             aa_reach: _,
+            target_weights,
         } => {
             // The aa layer needs to know *which* of `targets` belongs to
             // this layer. We match by ink color; if none of the targets
@@ -65,6 +66,11 @@ pub fn run_extractor(source: &RgbImage, layer: &Layer) -> GrayImage {
                     target_index,
                     aa_full: *aa_full,
                     aa_end: *aa_end,
+                    target_weights: if target_weights.len() == targets.len() {
+                        Some(target_weights)
+                    } else {
+                        None
+                    },
                 },
             )
         }
@@ -97,8 +103,35 @@ pub fn run_extractor(source: &RgbImage, layer: &Layer) -> GrayImage {
             index,
             dither,
         } => index_assignment::extract(source, palette, *index, *dither),
-        Extractor::ManualPaint => blank(source),
+        Extractor::ManualPaint { buf } => manual_paint_mask(source, buf.as_ref()),
     }
+}
+
+/// Return the user-painted mask for a [`Extractor::ManualPaint`]
+/// layer, resizing the stored buffer if the source dimensions drift
+/// (e.g. the user re-opened the image at a different resolution).
+/// If no buffer has been allocated yet, return a blank all-255 mask.
+fn manual_paint_mask(
+    source: &RgbImage,
+    buf: Option<&crate::engine::layer::ManualPaintBuf>,
+) -> GrayImage {
+    let (sw, sh) = source.dimensions();
+    let Some(buf) = buf else {
+        return blank(source);
+    };
+    if buf.width == sw && buf.height == sh {
+        // Fast path: dimensions match, reconstruct directly.
+        return ImageBuffer::from_raw(buf.width, buf.height, buf.pixels.clone())
+            .unwrap_or_else(|| blank(source));
+    }
+    // Dimensions drifted — scale the stored buffer into the source
+    // size with nearest-neighbour so binary edges stay crisp.
+    let stored: GrayImage =
+        match ImageBuffer::from_raw(buf.width, buf.height, buf.pixels.clone()) {
+            Some(img) => img,
+            None => return blank(source),
+        };
+    image::imageops::resize(&stored, sw, sh, image::imageops::FilterType::Nearest)
 }
 
 /// All-255 density map (no ink) at the same size as the source. Used for
@@ -106,4 +139,49 @@ pub fn run_extractor(source: &RgbImage, layer: &Layer) -> GrayImage {
 fn blank(source: &RgbImage) -> GrayImage {
     let (w, h) = source.dimensions();
     ImageBuffer::from_pixel(w, h, Luma([255u8]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::layer::{Extractor, Layer, ManualPaintBuf};
+
+    #[test]
+    fn manual_paint_returns_blank_without_buffer() {
+        let src = RgbImage::from_pixel(4, 4, image::Rgb([200, 100, 50]));
+        let mut layer = Layer::new_spot(crate::engine::color::Rgb::BLACK);
+        layer.extractor = Extractor::ManualPaint { buf: None };
+        let mask = run_extractor(&src, &layer);
+        for &p in mask.iter() {
+            assert_eq!(p, 255, "empty manual paint layer must have no ink");
+        }
+    }
+
+    #[test]
+    fn manual_paint_round_trips_buffer() {
+        let src = RgbImage::from_pixel(4, 4, image::Rgb([200, 100, 50]));
+        let mut buf = ManualPaintBuf::blank(4, 4);
+        // Paint a single pixel at (1, 2) → ink.
+        buf.pixels[2 * 4 + 1] = 0;
+        let mut layer = Layer::new_spot(crate::engine::color::Rgb::BLACK);
+        layer.extractor = Extractor::ManualPaint { buf: Some(buf) };
+        let mask = run_extractor(&src, &layer);
+        assert_eq!(mask.get_pixel(1, 2)[0], 0);
+        assert_eq!(mask.get_pixel(0, 0)[0], 255);
+    }
+
+    #[test]
+    fn manual_paint_resizes_on_dim_drift() {
+        // Buffer at 2x2, source at 4x4 → should nearest-scale up.
+        let src = RgbImage::from_pixel(4, 4, image::Rgb([0, 0, 0]));
+        let mut buf = ManualPaintBuf::blank(2, 2);
+        buf.pixels = vec![0, 255, 255, 255]; // ink in top-left of the 2x2
+        let mut layer = Layer::new_spot(crate::engine::color::Rgb::BLACK);
+        layer.extractor = Extractor::ManualPaint { buf: Some(buf) };
+        let mask = run_extractor(&src, &layer);
+        // Top-left quadrant should be ink (0), rest no-ink (255).
+        assert_eq!(mask.get_pixel(0, 0)[0], 0);
+        assert_eq!(mask.get_pixel(1, 1)[0], 0);
+        assert_eq!(mask.get_pixel(3, 3)[0], 255);
+    }
 }

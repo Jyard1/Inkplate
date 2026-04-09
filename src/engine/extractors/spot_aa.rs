@@ -30,6 +30,12 @@ pub struct Params<'a> {
     pub target_index: usize,
     pub aa_full: f32,
     pub aa_end: f32,
+    /// Per-target distance offsets, parallel to `targets`. When
+    /// `Some`, the effective distance to `targets[i]` is
+    /// `delta_e94(...) − target_weights[i]`. Positive weight makes
+    /// that plate "reach further" and claim pixels it would
+    /// otherwise lose. When `None`, plain CIE94 Voronoi applies.
+    pub target_weights: Option<&'a [f32]>,
 }
 
 pub fn extract(source: &RgbImage, params: Params<'_>) -> GrayImage {
@@ -41,17 +47,23 @@ pub fn extract(source: &RgbImage, params: Params<'_>) -> GrayImage {
 
     let target_labs: Vec<Lab> = params.targets.iter().copied().map(rgb_to_lab).collect();
     let other_labs: Vec<Lab> = params.others.iter().copied().map(rgb_to_lab).collect();
+    let weight_of = |i: usize| -> f32 {
+        params
+            .target_weights
+            .and_then(|w| w.get(i).copied())
+            .unwrap_or(0.0)
+    };
 
     for (x, y, p) in source.enumerate_pixels() {
         let lab = rgb_to_lab(Rgb(p[0], p[1], p[2]));
 
-        // Find the single nearest target under CIE94. Ties go to the
-        // lower index — a `<=` comparison would let both competing
-        // targets claim the pixel and print double-coverage.
+        // Find the single nearest target under CIE94 − weight. Ties
+        // go to the lower index — a `<=` comparison would let both
+        // competing targets claim the pixel and print double-coverage.
         let mut winner: usize = 0;
-        let mut winner_dist = lab.delta_e94(target_labs[0]);
+        let mut winner_dist = lab.delta_e94(target_labs[0]) - weight_of(0);
         for (i, &tl) in target_labs.iter().enumerate().skip(1) {
-            let d = lab.delta_e94(tl);
+            let d = lab.delta_e94(tl) - weight_of(i);
             if d < winner_dist {
                 winner = i;
                 winner_dist = d;
@@ -89,6 +101,7 @@ mod tests {
                 target_index: idx,
                 aa_full: 0.0,
                 aa_end: 0.0,
+                target_weights: None,
             },
         )
     }
@@ -140,6 +153,62 @@ mod tests {
         src.put_pixel(0, 0, image::Rgb([20, 20, 20]));
         let targets = [Rgb(0, 0, 0), Rgb(220, 30, 30)];
         assert_eq!(run(&src, &targets, 0).get_pixel(0, 0)[0], 0);
+    }
+
+    /// Per-target reach weights should be able to flip the winner
+    /// on a pixel that's equidistant to two targets. Default (no
+    /// weights) picks the lower index; a positive weight on the
+    /// higher index flips it.
+    #[test]
+    fn target_weight_biases_voronoi() {
+        let mut src: RgbImage = ImageBuffer::new(1, 1);
+        src.put_pixel(0, 0, image::Rgb([128, 128, 128]));
+        let targets = [Rgb(100, 100, 100), Rgb(160, 160, 160)];
+        let others: [Rgb; 0] = [];
+
+        // Without weights, the two targets are close enough that
+        // the lower-index one (darker gray) wins.
+        let baseline = extract(
+            &src,
+            Params {
+                targets: &targets,
+                others: &others,
+                target_index: 0,
+                aa_full: 0.0,
+                aa_end: 0.0,
+                target_weights: None,
+            },
+        );
+        let baseline_pixel = baseline.get_pixel(0, 0)[0];
+
+        // Bias target 1 way up — it should now win.
+        let weights = [0.0f32, 50.0];
+        let biased_0 = extract(
+            &src,
+            Params {
+                targets: &targets,
+                others: &others,
+                target_index: 0,
+                aa_full: 0.0,
+                aa_end: 0.0,
+                target_weights: Some(&weights),
+            },
+        );
+        let biased_1 = extract(
+            &src,
+            Params {
+                targets: &targets,
+                others: &others,
+                target_index: 1,
+                aa_full: 0.0,
+                aa_end: 0.0,
+                target_weights: Some(&weights),
+            },
+        );
+        // Target 0 loses the pixel once target 1's weight is high.
+        assert_eq!(baseline_pixel, 0);
+        assert_eq!(biased_0.get_pixel(0, 0)[0], 255);
+        assert_eq!(biased_1.get_pixel(0, 0)[0], 0);
     }
 
     /// Two palette entries at identical CIE94 distance must never both

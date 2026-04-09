@@ -81,7 +81,12 @@ impl Lab {
     ///
     /// Reference: `other` is treated as the reference color (its
     /// chroma drives the normalisation). For palette-assignment calls
-    /// pass the palette target as `other`.
+    /// pass the palette target as `other`. Dark-but-saturated pixels
+    /// against a neutral target can still produce imperfect
+    /// assignments under this metric; the spot workflow exposes a
+    /// per-layer Reach slider so the user can bias individual plates
+    /// when the automatic Voronoi doesn't land exactly where they
+    /// want it.
     pub fn delta_e94(self, other: Lab) -> f32 {
         // Graphic-arts weighting factors from the CIE94 paper.
         const K_L: f32 = 2.0;

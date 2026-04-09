@@ -33,7 +33,7 @@ impl TextureCache {
                 if state.composite_dirty || self.composite.is_none() {
                     let img = build_composite(state);
                     self.composite =
-                        Some(ctx.load_texture("composite", img, TextureOptions::LINEAR));
+                        Some(ctx.load_texture("composite", img, TextureOptions::NEAREST));
                     state.composite_dirty = false;
                 }
                 self.composite.as_ref()
@@ -42,7 +42,7 @@ impl TextureCache {
                 if self.source.is_none() {
                     if let Some(src) = state.source.as_deref() {
                         let img = rgb_to_color_image(src);
-                        self.source = Some(ctx.load_texture("source", img, TextureOptions::LINEAR));
+                        self.source = Some(ctx.load_texture("source", img, TextureOptions::NEAREST));
                     }
                 }
                 self.source.as_ref()
@@ -54,7 +54,7 @@ impl TextureCache {
                 let preview = entry.preview.as_ref()?;
                 let rgb = mask_over_shirt(preview, entry.layer.ink, state.shirt_color);
                 let img = rgb_to_color_image(&rgb);
-                self.composite = Some(ctx.load_texture("layer", img, TextureOptions::LINEAR));
+                self.composite = Some(ctx.load_texture("layer", img, TextureOptions::NEAREST));
                 self.composite.as_ref()
             }
         }

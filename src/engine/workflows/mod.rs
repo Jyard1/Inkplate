@@ -126,6 +126,15 @@ pub struct WorkflowOpts {
     pub max_colors: usize,
     pub fuzziness: f32,
     pub stencil_threshold: u8,
+    /// When true, the spot and sim-process workflows collapse
+    /// same-hue shades (bright red + blood red → one red plate) via
+    /// [`crate::engine::palette::consolidate_by_hue`]. Default is
+    /// **off** — modern k-means + CIE94 clustering already produces
+    /// well-separated centers, and merging them after the fact
+    /// throws away colors the user explicitly asked for when they
+    /// raised `max_colors`.
+    #[serde(default)]
+    pub consolidate_hues: bool,
     pub duotone_light: Rgb,
     pub duotone_dark: Rgb,
     pub tritone_highlight: Rgb,
@@ -136,9 +145,10 @@ pub struct WorkflowOpts {
 impl Default for WorkflowOpts {
     fn default() -> Self {
         Self {
-            max_colors: 8,
-            fuzziness: 60.0,
+            max_colors: 16,
+            fuzziness: 40.0,
             stencil_threshold: 128,
+            consolidate_hues: false,
             duotone_light: Rgb(240, 220, 200),
             duotone_dark: Rgb(30, 40, 80),
             tritone_highlight: Rgb(240, 220, 200),
@@ -156,6 +166,7 @@ pub fn run(workflow: Workflow, source: &RgbImage, opts: &WorkflowOpts) -> Vec<La
             source,
             spot::SpotOpts {
                 max_colors: opts.max_colors,
+                consolidate_hues: opts.consolidate_hues,
                 ..spot::SpotOpts::default()
             },
         ),
@@ -165,6 +176,7 @@ pub fn run(workflow: Workflow, source: &RgbImage, opts: &WorkflowOpts) -> Vec<La
             simprocess::SimOpts {
                 max_colors: opts.max_colors,
                 fuzziness: opts.fuzziness,
+                consolidate_hues: opts.consolidate_hues,
             },
         ),
         Workflow::SimprocessDark => simprocess::build_dark(
@@ -172,6 +184,7 @@ pub fn run(workflow: Workflow, source: &RgbImage, opts: &WorkflowOpts) -> Vec<La
             simprocess::SimOpts {
                 max_colors: opts.max_colors,
                 fuzziness: opts.fuzziness,
+                consolidate_hues: opts.consolidate_hues,
             },
         ),
         Workflow::SingleHalftone => single_halftone::build(source),

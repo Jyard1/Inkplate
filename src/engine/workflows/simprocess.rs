@@ -33,6 +33,10 @@ use crate::engine::workflows::curves;
 pub struct SimOpts {
     pub max_colors: usize,
     pub fuzziness: f32,
+    /// Collapse same-hue shades onto a single halftone channel.
+    /// Off by default so cranking `max_colors` actually produces
+    /// more distinct plates.
+    pub consolidate_hues: bool,
 }
 
 impl Default for SimOpts {
@@ -46,6 +50,7 @@ impl Default for SimOpts {
             // different (CIE94 distances are smaller), so nudge this
             // up slightly to keep selections looking the same.
             fuzziness: 40.0,
+            consolidate_hues: false,
         }
     }
 }
@@ -96,7 +101,9 @@ fn color_channel_layers(source: &RgbImage, opts: SimOpts) -> Vec<Layer> {
             min_coverage: 0.003,
         },
     );
-    palette = consolidate_by_hue(&palette, HueOpts::default());
+    if opts.consolidate_hues {
+        palette = consolidate_by_hue(&palette, HueOpts::default());
+    }
 
     // Drop near-grayscale entries — those belong to the black plate /
     // highlight white, not to a dedicated color screen.

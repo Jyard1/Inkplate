@@ -5,10 +5,13 @@
 //! so the inspector can rerun a single layer without touching the
 //! others. All mutation goes through the `InkplateApp` in `app.rs`.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use eframe::egui;
 use image::{GrayImage, RgbImage};
+use uuid::Uuid;
 
 use inkplate::engine::color::Rgb;
 use inkplate::engine::layer::Layer;
@@ -89,6 +92,11 @@ pub struct GuiState {
 
     pub layers: Vec<LayerEntry>,
     pub selected: Option<usize>,
+    /// Secondary selection used for batch operations (currently
+    /// "Merge → shadow halftone"). Stored as Uuid so it survives
+    /// reorders and deletions without us having to rewrite indices.
+    /// Ctrl+click on a layer row toggles it. Plain click clears.
+    pub multi_select: HashSet<Uuid>,
 
     pub shirt_color: Rgb,
     pub preview_mode: PreviewMode,
@@ -107,6 +115,51 @@ pub struct GuiState {
     /// True while the composite preview texture needs to be rebuilt.
     /// Set by any action that changes a layer's preview mask.
     pub composite_dirty: bool,
+
+    /// Center-panel viewport transform. `fit` means "ignore zoom and
+    /// pan, scale to fit the panel"; otherwise the `zoom` (pixel-
+    /// space scale) and `pan` (offset in screen pixels from the
+    /// panel centre) fields drive the display.
+    pub viewport: Viewport,
+
+    /// Manual-paint brush state for `Extractor::ManualPaint` layers.
+    pub brush: BrushState,
+}
+
+/// Manual-paint brush settings — size, mode, active state.
+#[derive(Debug, Clone, Copy)]
+pub struct BrushState {
+    /// Brush radius in source pixels.
+    pub radius: u32,
+    /// True = paint ink (density 0), false = erase (density 255).
+    pub paint_mode: bool,
+}
+
+impl Default for BrushState {
+    fn default() -> Self {
+        Self {
+            radius: 16,
+            paint_mode: true,
+        }
+    }
+}
+
+/// Zoom / pan state for the center preview panel.
+#[derive(Debug, Clone, Copy)]
+pub struct Viewport {
+    pub fit: bool,
+    pub zoom: f32,
+    pub pan: egui::Vec2,
+}
+
+impl Default for Viewport {
+    fn default() -> Self {
+        Self {
+            fit: true,
+            zoom: 1.0,
+            pan: egui::Vec2::ZERO,
+        }
+    }
 }
 
 impl Default for GuiState {
@@ -120,12 +173,15 @@ impl Default for GuiState {
             job: JobOpts::default(),
             layers: Vec::new(),
             selected: None,
+            multi_select: HashSet::new(),
             shirt_color: Rgb(24, 24, 28),
             preview_mode: PreviewMode::Composite,
             bg_removal: BackgroundRemoval::default(),
             foreground_mask: None,
             status: "ready".into(),
             composite_dirty: true,
+            viewport: Viewport::default(),
+            brush: BrushState::default(),
         }
     }
 }

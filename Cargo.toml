@@ -21,6 +21,9 @@ path = "src/main.rs"
 [dependencies]
 # Image I/O and basic ops (PIL replacement)
 image = { version = "0.25", features = ["png", "jpeg", "tiff", "webp"] }
+# Direct dep on the png crate so film export can write the pHYs DPI
+# chunk through the encoder API instead of splicing bytes.
+png = "0.17"
 imageproc = "0.25"
 ab_glyph = "0.2"
 

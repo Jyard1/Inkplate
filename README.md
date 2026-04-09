@@ -2,6 +2,13 @@
 
 # Inkplate
 
+> # ⚠ **VIBE CODED WITH AI**
+>
+> **This codebase was generated end-to-end through AI assistance ("vibe
+> coding"). Read the source, run the tests, and use your own judgement
+> before trusting it for production separations — the author doesn't
+> claim line-by-line authorship of this code.**
+
 A screen-printing color separation tool built around a **continuous-tone
 density-map engine**. Handles vector logos, cel-shaded illustration,
 photoreal art, B&W halftone, pixel art, distressed, duotone, and mixed
@@ -13,27 +20,73 @@ media from a single unified pipeline.
 
 ## Features
 
-- **9 extractors** — spot-solid, spot anti-aliased, color range, HSB
-  brightness inverted (the correct underbase recipe), LAB lightness
-  inverted, GCR black, channel calculation DSL, luminance threshold,
-  index assignment
+### Engine
+
+- **9 extractors** — spot-solid, spot anti-aliased (hard Voronoi with
+  CIE94 distance), color range, HSB brightness inverted (the correct
+  underbase recipe), LAB lightness inverted, GCR black, channel
+  calculation DSL, luminance threshold, index assignment
 - **11 workflow presets** — spot, cel-shaded, sim-process light/dark,
   single halftone, black only, stencil, duotone, tritone, index FS,
   index Bayer
 - **Auto-detect** picks the right workflow for the image
+- **LAB-space k-means palette** with CIE94 ΔE clustering. Preserves
+  small saturated accents (yellow torch flames, red buttons) that
+  naive RGB median-cut would merge away. `snap_extremes` forces
+  near-black and near-white palette entries to pure `#000` / `#FFF`
+  so plate swatches match the actual inks.
 - **4 dither algorithms** — Floyd-Steinberg, Bayer, blue noise (true
   void-and-cluster), white noise
-- **Halftone rasterizer** with rotated screens, 4 dot shapes, anti-aliased
-  edges, per-layer LPI/angle/curve overrides
+- **Halftone rasterizer** with rotated screens, 4 dot shapes,
+  anti-aliased edges, per-layer LPI/angle/curve overrides
 - **Background removal** via edge-seeded flood fill *or* alpha channel
   pass-through if the source PNG already has transparency
-- **Project save/load** as `.inkplate` JSON files (versioned schema)
-- **Film export** with embedded DPI metadata, registration marks,
-  film borders + captions, and contact sheets
-- **Headless engine** — the library crate (`inkplate`) is fully usable
-  without the GUI for batch jobs and automation
-- **Two CLI binaries** — `extract` (run one extractor) and `separate`
-  (run a full workflow against an image)
+
+### GUI
+
+- **Background processing worker** — `process_layer` runs on a
+  dedicated thread, so slider drags stay snappy on multi-megapixel
+  sources. Jobs coalesce (the latest one wins), and a generation
+  counter drops results that got stale from layer reorders or
+  workflow reruns.
+- **Preview zoom & pan** — mouse-wheel zoom around the cursor,
+  middle-drag pan, `F` to refit, `1` for 100%. Nearest-neighbour
+  filtering so zoomed-in pixels stay crisp.
+- **Undo / redo** — `Ctrl+Z` / `Ctrl+Y`, 64-entry history stack.
+  Slider drags coalesce to one undo step; layer reorders, deletions,
+  workflow reruns, brush strokes, and merge ops all snapshot.
+- **Curve editor widget** — drag control points, double-click to
+  add, right-click to delete. Endpoints stay at `x=0` and `x=255`;
+  non-endpoint points can't leapfrog their neighbours.
+- **Manual paint brush** — `Extractor::ManualPaint` layers have a
+  per-layer stroke buffer; Primary-drag on the preview paints ink,
+  toggleable to erase. The buffer serializes into `.inkplate`
+  projects as raw bytes.
+- **Ink color picker** — visible swatch + hex text input in the
+  Identity section, so you can type a Pantone hex directly.
+- **Multi-select + merge ops** — `Ctrl+click` layer names to build
+  a blue-outlined multi-selection, then:
+  - **Merge → shadow HT**: collapses the selected layers onto the
+    lightest-ink plate and emits a new black halftone shadow plate
+    whose density encodes the darker shades from a single extra ink.
+  - **Merge same ink**: unions the masks of several same-ink plates
+    (e.g. multiple black shadow plates) into one screen.
+- **Per-plate Reach slider** on `spot_aa` layers — biases the CIE94
+  distance for this plate so you can pull pixels onto it (or push
+  them away) when the automatic Voronoi doesn't land right.
+  Weights propagate across every layer's copy of the targets list
+  so there's no double-coverage between plates.
+
+### I/O and export
+
+- **Project save/load** as `.inkplate` JSON files (versioned schema).
+- **Film export** with embedded DPI metadata (pHYs chunk written
+  directly through the `png` crate encoder), registration marks,
+  film borders + captions, and contact sheets.
+- **Headless engine** — the library crate (`inkplate`) is fully
+  usable without the GUI for batch jobs and automation.
+- **Two CLI binaries** — `extract` (run one extractor) and
+  `separate` (run a full workflow against an image).
 
 ## Design
 
@@ -60,8 +113,8 @@ black plate, highlight white, and any future extractor type.
 Requires Rust 1.75+. Install via [rustup](https://rustup.rs).
 
 ```sh
-git clone https://github.com/adam/inkplate
-cd inkplate
+git clone https://github.com/Jyard1/Inkplate
+cd Inkplate
 cargo run --release
 ```
 
@@ -113,23 +166,22 @@ pipeline is importable and testable without pulling in the GUI stack.
 - **Auto-detected workflow not great?** Override it from the dropdown.
   Sim-process workflows always halftone color channels; spot, cel-shaded,
   and index workflows render solid.
-
-## Known issues
-
-- No background processing worker — slider drags on very large images
-  may stutter because every rerun happens on the UI thread.
-- No curve editor widget yet. Tone curves come from workflow presets;
-  the inspector shows the point count but isn't editable.
-- No preview zoom/pan — fit-to-panel only.
-- No undo/redo. Save your work as a `.inkplate` project before tweaking.
-- No manual paint brush — the `Extractor::ManualPaint` variant is
-  reserved for it.
-- The PNG `pHYs` chunk (DPI metadata) is currently injected via a manual
-  byte splice after the encoder. Plan is to switch to the `png` crate
-  directly so the metadata is written cleanly.
-
-All of these are tracked as `TODO(...)` markers in the source — `grep -r
-TODO src/` to see what's open.
+- **Colorful illustration** — set the Max palette colors slider
+  high (16–24 for multi-hue art) and leave "Merge same hue"
+  unchecked by default. If the automatic Voronoi misassigns a
+  shaded region, select that plate, scroll the inspector to
+  Extractor, and nudge the **Reach** slider until it claims what
+  it should.
+- **Reducing plate count on the press** — after running the spot
+  workflow, `Ctrl+click` several same-hue layers (all reds, or all
+  teals) and click **Merge → shadow HT** to collapse them into one
+  bright-color plate plus one black halftone shadow plate. Repeat
+  for each hue family. Then `Ctrl+click` the resulting black
+  shadow plates and click **Merge same ink** to put them all on a
+  single screen. Classic two-ink shading trick.
+- **Exact Pantone matches** — paste the hex value into the Ink
+  field in the Inspector → Identity section. It updates the plate
+  immediately and triggers a reprocess.
 
 ## License
 

@@ -17,7 +17,7 @@
 //!    DPI so downstream RIPs open it at the correct physical size.
 
 use std::fs::File;
-use std::io::{BufWriter, Write};
+use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -165,102 +165,29 @@ fn sanitize(name: &str) -> String {
 /// Write an 8-bit grayscale PNG with a `pHYs` chunk encoding the DPI
 /// so RIP software opens the film at the correct physical size.
 ///
-/// We go through the `png` crate manually (via `image`'s re-export)
-/// rather than `GrayImage::save` because the latter doesn't expose the
-/// pHYs chunk. The chunk stores pixels per meter as big-endian u32 +
-/// a `1` byte meaning "the unit is meters".
+/// Goes through the `png` crate's encoder directly (not `image`) so
+/// the pHYs chunk is written cleanly alongside the IHDR instead of
+/// being spliced in after the fact. The chunk stores pixels per
+/// meter (CIE unit 1 = meters) as a big-endian `u32` in each axis.
 pub fn write_png_with_dpi(img: &GrayImage, path: &Path, dpi: u32) -> anyhow::Result<()> {
-    use image::codecs::png::{CompressionType, FilterType as PngFilter, PngEncoder};
-    use image::{ExtendedColorType, ImageEncoder};
-
     let file = File::create(path)?;
-    let mut w = BufWriter::new(file);
-
-    // Write PNG through the image crate's encoder. As of `image` 0.25
-    // the PngEncoder doesn't expose pHYs, so we write the file twice:
-    // once through the encoder, then surgically insert a pHYs chunk
-    // before the IDAT. This is fragile; TODO(L6) switch to the `png`
-    // crate directly for cleaner metadata support.
-    let mut buffer: Vec<u8> = Vec::new();
-    {
-        let encoder = PngEncoder::new_with_quality(
-            &mut buffer,
-            CompressionType::Default,
-            PngFilter::Adaptive,
-        );
-        encoder.write_image(
-            img.as_raw(),
-            img.width(),
-            img.height(),
-            ExtendedColorType::L8,
-        )?;
-    }
-
-    let with_phys = insert_phys_chunk(&buffer, dpi)?;
-    w.write_all(&with_phys)?;
-    w.flush()?;
-    Ok(())
-}
-
-/// Surgically insert a pHYs chunk after the IHDR of an existing PNG byte
-/// stream. Returns the modified buffer.
-fn insert_phys_chunk(png: &[u8], dpi: u32) -> anyhow::Result<Vec<u8>> {
-    // PNG layout:
-    //   8-byte signature
-    //   IHDR chunk (13-byte data + 4 length + 4 type + 4 crc = 25 bytes)
-    //   ... more chunks ...
-    //   IEND
-    //
-    // pHYs chunk data is 9 bytes:
-    //   4: pixels-per-unit X (big endian)
-    //   4: pixels-per-unit Y (big endian)
-    //   1: unit (1 = meters)
-    const SIG_LEN: usize = 8;
-    const IHDR_CHUNK_LEN: usize = 4 + 4 + 13 + 4; // length + type + data + crc
-
-    if png.len() < SIG_LEN + IHDR_CHUNK_LEN {
-        anyhow::bail!("png too short");
-    }
-    let inject_at = SIG_LEN + IHDR_CHUNK_LEN;
+    let w = BufWriter::new(file);
 
     // 1 inch = 0.0254 m, so pixels/meter = dpi / 0.0254
     let ppm = ((dpi as f32) / 0.0254).round() as u32;
 
-    let mut chunk = Vec::with_capacity(4 + 4 + 9 + 4);
-    // length (9 bytes of data)
-    chunk.extend_from_slice(&9u32.to_be_bytes());
-    // chunk type "pHYs"
-    chunk.extend_from_slice(b"pHYs");
-    // data
-    chunk.extend_from_slice(&ppm.to_be_bytes());
-    chunk.extend_from_slice(&ppm.to_be_bytes());
-    chunk.push(1); // unit = meters
-                   // crc over type + data
-    let crc = png_crc(&chunk[4..]);
-    chunk.extend_from_slice(&crc.to_be_bytes());
+    let mut encoder = png::Encoder::new(w, img.width(), img.height());
+    encoder.set_color(png::ColorType::Grayscale);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder.set_pixel_dims(Some(png::PixelDimensions {
+        xppu: ppm,
+        yppu: ppm,
+        unit: png::Unit::Meter,
+    }));
 
-    let mut out = Vec::with_capacity(png.len() + chunk.len());
-    out.extend_from_slice(&png[..inject_at]);
-    out.extend_from_slice(&chunk);
-    out.extend_from_slice(&png[inject_at..]);
-    Ok(out)
-}
-
-/// Minimal PNG CRC-32 (polynomial 0xedb88320). Just enough for the
-/// pHYs chunk — not used anywhere else, so no table pre-compute.
-fn png_crc(bytes: &[u8]) -> u32 {
-    let mut crc: u32 = 0xffff_ffff;
-    for &b in bytes {
-        crc ^= b as u32;
-        for _ in 0..8 {
-            if crc & 1 != 0 {
-                crc = (crc >> 1) ^ 0xedb8_8320;
-            } else {
-                crc >>= 1;
-            }
-        }
-    }
-    crc ^ 0xffff_ffff
+    let mut writer = encoder.write_header()?;
+    writer.write_image_data(img.as_raw())?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -268,32 +195,32 @@ mod tests {
     use super::*;
     use image::{ImageBuffer, Luma};
 
+    /// Writing a tiny grayscale PNG should produce a file with a
+    /// `pHYs` chunk whose pixels-per-meter round-trips to the DPI
+    /// we passed in.
     #[test]
     fn phys_chunk_inserted() {
-        // Write a tiny PNG, inject pHYs, verify the magic bytes show up.
         let img: GrayImage = ImageBuffer::from_pixel(4, 4, Luma([128]));
-        let tmp = std::env::temp_dir().join("diyrip_phys_test.png");
+        let tmp = std::env::temp_dir().join("inkplate_phys_test.png");
         write_png_with_dpi(&img, &tmp, 300).unwrap();
-        let bytes = std::fs::read(&tmp).unwrap();
-        // Search for "pHYs" marker
-        let marker = b"pHYs";
-        let found = bytes.windows(marker.len()).any(|w| w == marker);
-        assert!(found, "pHYs chunk not found in output");
-        std::fs::remove_file(&tmp).ok();
-    }
 
-    #[test]
-    fn crc_matches_known_value() {
-        // CRC of "pHYs" + 9 zero bytes, known value cross-checked with
-        // external PNG tools. If this ever changes, we've broken the
-        // polynomial or the byte order.
-        let mut data = Vec::new();
-        data.extend_from_slice(b"pHYs");
-        data.extend_from_slice(&[0u8; 9]);
-        let crc = png_crc(&data);
-        // This is just a regression guard — the specific value here
-        // was captured from the first known-good run.
-        assert_ne!(crc, 0);
-        assert_eq!(png_crc(b""), 0);
+        // Read it back through the png crate and inspect the pHYs.
+        let file = std::fs::File::open(&tmp).unwrap();
+        let decoder = png::Decoder::new(file);
+        let reader = decoder.read_info().unwrap();
+        let info = reader.info();
+        let dims = info.pixel_dims.expect("pHYs chunk should be present");
+        assert!(matches!(dims.unit, png::Unit::Meter));
+        // 300 DPI → 11811 ppm (±1 due to rounding).
+        let expected = (300.0_f32 / 0.0254).round() as u32;
+        assert!(
+            dims.xppu.abs_diff(expected) <= 1,
+            "xppu {} != expected {}",
+            dims.xppu,
+            expected
+        );
+        assert_eq!(dims.xppu, dims.yppu);
+
+        std::fs::remove_file(&tmp).ok();
     }
 }

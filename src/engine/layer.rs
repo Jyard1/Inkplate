@@ -46,6 +46,16 @@ pub enum Extractor {
         aa_full: f32,
         aa_end: f32,
         aa_reach: u32,
+        /// Per-target distance offsets, parallel to `targets`.
+        /// Positive value = "this plate reaches further" (its
+        /// CIE94 distance is subtracted by this amount, so it
+        /// wins pixels it would otherwise lose). Negative =
+        /// "reach less". Default is all zeros, which is plain
+        /// Voronoi. Must have the same length as `targets`;
+        /// deserialization fills in zeros for projects saved
+        /// before the field existed.
+        #[serde(default)]
+        target_weights: Vec<f32>,
     },
     /// Photoshop Color Range: LAB-ΔE density ramp with falloff.
     ColorRange {
@@ -75,8 +85,36 @@ pub enum Extractor {
         // and the two can't coexist.
         dither: IndexDitherKind,
     },
-    /// User-painted mask. The pipeline returns whatever's in the cache.
-    ManualPaint,
+    /// User-painted mask. The pipeline returns the [`ManualPaintBuf`]
+    /// buffer verbatim (density convention: 0 = ink, 255 = no ink).
+    /// The buffer is `None` until the user actually paints something,
+    /// at which point the GUI allocates one matching the source
+    /// dimensions.
+    ManualPaint { buf: Option<ManualPaintBuf> },
+}
+
+/// Raw stroke buffer for [`Extractor::ManualPaint`].
+///
+/// Stored as flat 8-bit grayscale bytes so it round-trips through
+/// serde without needing a base64 escape hatch. For multi-megapixel
+/// layers this is chunky in `.inkplate` project files but simple and
+/// lossless; we can swap in PNG-compressed storage later if needed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ManualPaintBuf {
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Vec<u8>,
+}
+
+impl ManualPaintBuf {
+    /// Allocate a fresh "no ink anywhere" buffer at the given size.
+    pub fn blank(width: u32, height: u32) -> Self {
+        Self {
+            width,
+            height,
+            pixels: vec![255u8; (width as usize) * (height as usize)],
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

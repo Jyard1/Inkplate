@@ -52,9 +52,11 @@ pub struct Lab {
 }
 
 impl Lab {
-    /// Euclidean ΔE*ab (CIE76). Good enough for palette merging and
-    /// nearest-color lookups; if we ever need CIEDE2000 we'll add it
-    /// alongside, not replace this.
+    /// Euclidean ΔE*ab (CIE76). Fast, rough — fine for quick nearest-
+    /// neighbour lookups where perceptual accuracy doesn't matter.
+    /// For palette clustering and spot-plate assignment use
+    /// [`Self::delta_e94`] instead, which weights lightness less than
+    /// chroma/hue and matches how a screen printer eyeballs colors.
     pub fn delta_e(self, other: Lab) -> f32 {
         let dl = self.l - other.l;
         let da = self.a - other.a;
@@ -62,9 +64,53 @@ impl Lab {
         (dl * dl + da * da + db * db).sqrt()
     }
 
-    /// Hue angle in degrees, `[0, 360)`. Used by the hue-family palette
-    /// consolidation pass so dark red and bright red end up on the same
-    /// screen.
+    /// CIE94 ΔE — graphic-arts variant with `k_L = 2`.
+    ///
+    /// This is the distance we use for every "is color A visually the
+    /// same as color B?" decision in the engine: palette clustering,
+    /// spot plate assignment, hue-family merging. The graphic-arts
+    /// variant down-weights lightness relative to chroma and hue,
+    /// which is the right trade-off for screen printing because:
+    ///
+    /// - A dark shadow of a red object is still "red" to the press
+    ///   operator — they want it on the red screen, not on black.
+    /// - Two shades of the same hue (bright red + blood red) should
+    ///   land on the same plate.
+    /// - Distinct hues (red vs orange, cyan vs teal) should stay on
+    ///   separate plates even when their lightness is similar.
+    ///
+    /// Reference: `other` is treated as the reference color (its
+    /// chroma drives the normalisation). For palette-assignment calls
+    /// pass the palette target as `other`.
+    pub fn delta_e94(self, other: Lab) -> f32 {
+        // Graphic-arts weighting factors from the CIE94 paper.
+        const K_L: f32 = 2.0;
+        const K1: f32 = 0.048;
+        const K2: f32 = 0.014;
+
+        let dl = self.l - other.l;
+        let da = self.a - other.a;
+        let db = self.b - other.b;
+
+        let c1 = other.chroma();
+        let c2 = self.chroma();
+        let dc = c2 - c1;
+        // dH² = dA² + dB² − dC². Floating-point slop can push this
+        // slightly negative for near-identical colors, so clamp.
+        let dh_sq = (da * da + db * db - dc * dc).max(0.0);
+
+        let s_l = 1.0;
+        let s_c = 1.0 + K1 * c1;
+        let s_h = 1.0 + K2 * c1;
+
+        let tl = dl / (K_L * s_l);
+        let tc = dc / s_c;
+        let th_sq = dh_sq / (s_h * s_h);
+
+        (tl * tl + tc * tc + th_sq).sqrt()
+    }
+
+    /// Hue angle in degrees, `[0, 360)`.
     pub fn hue_deg(self) -> f32 {
         let h = self.b.atan2(self.a).to_degrees();
         if h < 0.0 {
@@ -344,6 +390,36 @@ mod tests {
         assert!(rgb_to_lab(Rgb(200, 20, 20)).hue_deg() < 45.0); // red-ish
         let green = rgb_to_lab(Rgb(20, 200, 20)).hue_deg();
         assert!((90.0..180.0).contains(&green));
+    }
+
+    #[test]
+    fn delta_e94_sanity() {
+        // Identical colors → 0.
+        let red = rgb_to_lab(Rgb(220, 30, 30));
+        assert!(red.delta_e94(red) < 0.01);
+
+        // A dark shade of red should be "closer" (smaller ΔE94) to
+        // the bright red reference than pure black is. Under plain
+        // CIE76 black actually wins — that's the bug CIE94 fixes.
+        let dark_red = rgb_to_lab(Rgb(90, 15, 15));
+        let black = rgb_to_lab(Rgb::BLACK);
+        let d_to_red = dark_red.delta_e94(red);
+        let d_to_black = black.delta_e94(red);
+        assert!(
+            d_to_red < d_to_black,
+            "dark red ({d_to_red}) must be closer to red than black ({d_to_black}) is to red"
+        );
+
+        // A saturated yellow must land closer to yellow than to red
+        // under CIE94.
+        let yellow = rgb_to_lab(Rgb(240, 220, 40));
+        let yellow_target = rgb_to_lab(Rgb(230, 210, 30));
+        let d_yy = yellow.delta_e94(yellow_target);
+        let d_yr = yellow.delta_e94(red);
+        assert!(
+            d_yy < d_yr,
+            "yellow→yellow ({d_yy}) must be < yellow→red ({d_yr})"
+        );
     }
 
     #[test]

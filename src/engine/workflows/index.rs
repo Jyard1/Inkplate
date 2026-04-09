@@ -17,7 +17,7 @@ use image::RgbImage;
 
 use crate::engine::color::color_name;
 use crate::engine::layer::{Extractor, IndexDitherKind, Layer, LayerKind, RenderMode};
-use crate::engine::palette::{auto_palette, PaletteOpts};
+use crate::engine::palette::{auto_palette, snap_extremes, PaletteOpts};
 
 #[derive(Debug, Clone, Copy)]
 pub struct IndexOpts {
@@ -26,7 +26,11 @@ pub struct IndexOpts {
 
 impl Default for IndexOpts {
     fn default() -> Self {
-        Self { max_colors: 8 }
+        // 12 is the sweet spot for index separation: enough hue
+        // diversity for most pixel art and limited-palette
+        // illustration, few enough that each plate has legible
+        // coverage after dithering.
+        Self { max_colors: 12 }
     }
 }
 
@@ -40,7 +44,7 @@ pub fn build_bayer(source: &RgbImage, opts: IndexOpts) -> Vec<Layer> {
 
 fn build(source: &RgbImage, opts: IndexOpts, kind: IndexDitherKind) -> Vec<Layer> {
     let pixels = source.as_raw();
-    let (palette, _quant) = auto_palette(
+    let (mut palette, _quant) = auto_palette(
         pixels,
         PaletteOpts {
             max_colors: opts.max_colors,
@@ -48,6 +52,7 @@ fn build(source: &RgbImage, opts: IndexOpts, kind: IndexDitherKind) -> Vec<Layer
             min_coverage: 0.002,
         },
     );
+    snap_extremes(&mut palette);
 
     let rgb_palette: Vec<_> = palette.iter().map(|e| e.rgb).collect();
 

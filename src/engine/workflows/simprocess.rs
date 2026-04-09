@@ -38,8 +38,14 @@ pub struct SimOpts {
 impl Default for SimOpts {
     fn default() -> Self {
         Self {
-            max_colors: 8,
-            fuzziness: 60.0,
+            // 10 color channels plus underbase + black + highlight
+            // white is a realistic upper bound for sim-process jobs
+            // without turning into a registration nightmare.
+            max_colors: 10,
+            // With CIE94-based color_range the fuzziness scale is
+            // different (CIE94 distances are smaller), so nudge this
+            // up slightly to keep selections looking the same.
+            fuzziness: 40.0,
         }
     }
 }
@@ -85,7 +91,9 @@ fn color_channel_layers(source: &RgbImage, opts: SimOpts) -> Vec<Layer> {
         PaletteOpts {
             max_colors: opts.max_colors,
             merge_delta_e: 10.0,
-            min_coverage: 0.01,
+            // Accent colors matter in sim-process too — a 0.3%
+            // saturated spot can be the visual focus of the art.
+            min_coverage: 0.003,
         },
     );
     palette = consolidate_by_hue(&palette, HueOpts::default());
@@ -112,7 +120,7 @@ fn color_channel_layers(source: &RgbImage, opts: SimOpts) -> Vec<Layer> {
         layer.kind = LayerKind::Color;
         layer.extractor = Extractor::ColorRange {
             target: entry.rgb,
-            fuzziness: 60.0,
+            fuzziness: opts.fuzziness,
             falloff: ColorRangeFalloff::Smooth,
         };
         layer.tone = Tone {

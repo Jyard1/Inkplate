@@ -1,20 +1,23 @@
-//! Anti-aliased spot extractor — Voronoi assignment with soft edge falloff.
+//! Hard Voronoi spot extractor — each pixel lands on exactly one plate.
 //!
-//! Cel-shaded art lives in the gap between "flat vector" and "continuous
-//! tone": most pixels belong to exactly one ink color, but the edge
-//! pixels are anti-aliased blends between two inks and shouldn't be
-//! snapped to one side or the other. This extractor walks every pixel,
-//! finds the nearest target color in LAB, and returns:
+//! For every source pixel we compute [`Lab::delta_e94`] (the CIE94
+//! graphic-arts ΔE) against every palette target and paint full ink on
+//! whichever target wins. Ties are broken deterministically by lowest
+//! target index so two palette entries with identical distance can
+//! never both claim the same pixel (which would print as registration
+//! bleed on the press).
 //!
-//! - full ink (0) if the pixel is close enough to `target` (distance
-//!   ≤ `aa_full`)
-//! - no ink (255) if it's closer to another target or past `aa_end`
-//! - a linear ramp in between, so the edge pixels partially contribute
-//!   to the nearest target layer
+//! No soft ramp, no partial densities: spot plates are solid ink, so
+//! pixels at the boundary between two hues snap hard to one side.
+//! Edge anti-aliasing from the source doesn't translate meaningfully
+//! to a physical screen at print resolution, and any grayscale output
+//! here ends up as translucent ink in the composite preview (which
+//! reads as "blurry") and as grayscale on the film (which a real press
+//! can't reproduce without halftoning).
 //!
-//! `aa_reach` is a pixel-radius hint for the maximum supported anti-alias
-//! width in the source — used to clamp the distance ramp so very noisy
-//! sources don't bleed across unrelated regions.
+//! The `aa_full`, `aa_end`, and `aa_reach` fields on [`Params`] are
+//! legacy — kept in the struct so existing saved projects deserialize,
+//! but no longer consulted. CIE94 is the whole distance story.
 
 use image::{GrayImage, ImageBuffer, Luma, RgbImage};
 
@@ -38,40 +41,33 @@ pub fn extract(source: &RgbImage, params: Params<'_>) -> GrayImage {
 
     let target_labs: Vec<Lab> = params.targets.iter().copied().map(rgb_to_lab).collect();
     let other_labs: Vec<Lab> = params.others.iter().copied().map(rgb_to_lab).collect();
-    let me = target_labs[params.target_index];
-
-    let full = params.aa_full.max(0.0);
-    let end = params.aa_end.max(full + 0.1);
 
     for (x, y, p) in source.enumerate_pixels() {
         let lab = rgb_to_lab(Rgb(p[0], p[1], p[2]));
-        let d_me = lab.delta_e(me);
 
-        // Nearest-other distance: against every other target AND the
-        // "others" list (colors we explicitly don't want to claim).
-        let mut nearest_other = f32::INFINITY;
-        for (i, &tl) in target_labs.iter().enumerate() {
-            if i != params.target_index {
-                nearest_other = nearest_other.min(lab.delta_e(tl));
+        // Find the single nearest target under CIE94. Ties go to the
+        // lower index — a `<=` comparison would let both competing
+        // targets claim the pixel and print double-coverage.
+        let mut winner: usize = 0;
+        let mut winner_dist = lab.delta_e94(target_labs[0]);
+        for (i, &tl) in target_labs.iter().enumerate().skip(1) {
+            let d = lab.delta_e94(tl);
+            if d < winner_dist {
+                winner = i;
+                winner_dist = d;
             }
         }
-        for &ol in &other_labs {
-            nearest_other = nearest_other.min(lab.delta_e(ol));
-        }
+        // "Others" are colors we explicitly do not want to claim. If
+        // one of them is strictly closer than the winning target, no
+        // plate gets this pixel.
+        let rejected = other_labs
+            .iter()
+            .any(|&ol| lab.delta_e94(ol) < winner_dist);
 
-        // Only claim this pixel if we're the closest target.
-        if d_me > nearest_other {
-            out.put_pixel(x, y, Luma([255]));
-            continue;
-        }
-
-        let density = if d_me <= full {
+        let density = if !rejected && winner == params.target_index {
             0u8
-        } else if d_me >= end {
-            255u8
         } else {
-            let t = (d_me - full) / (end - full);
-            (t * 255.0).round().clamp(0.0, 255.0) as u8
+            255u8
         };
         out.put_pixel(x, y, Luma([density]));
     }
@@ -82,24 +78,87 @@ pub fn extract(source: &RgbImage, params: Params<'_>) -> GrayImage {
 mod tests {
     use super::*;
 
+    /// Helper to drop the legacy params from the test call sites.
+    fn run(src: &RgbImage, targets: &[Rgb], idx: usize) -> GrayImage {
+        let others: [Rgb; 0] = [];
+        extract(
+            src,
+            Params {
+                targets,
+                others: &others,
+                target_index: idx,
+                aa_full: 0.0,
+                aa_end: 0.0,
+            },
+        )
+    }
+
     #[test]
     fn exact_match_is_full_ink() {
         let mut src: RgbImage = ImageBuffer::new(2, 1);
         src.put_pixel(0, 0, image::Rgb([255, 0, 0]));
         src.put_pixel(1, 0, image::Rgb([0, 255, 0]));
         let targets = [Rgb(255, 0, 0), Rgb(0, 255, 0)];
-        let others: [Rgb; 0] = [];
-        let out = extract(
-            &src,
-            Params {
-                targets: &targets,
-                others: &others,
-                target_index: 0,
-                aa_full: 4.0,
-                aa_end: 14.0,
-            },
-        );
+        let out = run(&src, &targets, 0);
         assert_eq!(out.get_pixel(0, 0)[0], 0);
         assert_eq!(out.get_pixel(1, 0)[0], 255);
+    }
+
+    /// Dark-but-saturated red belongs on the red plate, not black.
+    /// Under plain CIE76 ΔE black wins because the L-axis distance
+    /// dominates — this is the bug that CIE94 fixes.
+    #[test]
+    fn dark_saturated_red_goes_to_red_not_black() {
+        let mut src: RgbImage = ImageBuffer::new(1, 1);
+        src.put_pixel(0, 0, image::Rgb([90, 15, 15]));
+        let targets = [Rgb(0, 0, 0), Rgb(220, 30, 30)];
+
+        assert_eq!(run(&src, &targets, 1).get_pixel(0, 0)[0], 0);
+        assert_eq!(run(&src, &targets, 0).get_pixel(0, 0)[0], 255);
+    }
+
+    /// A saturated yellow must land on the yellow plate and not get
+    /// stolen by a red neighbour — this is the "red ate my yellow"
+    /// regression from the demon test image.
+    #[test]
+    fn yellow_beats_red_for_yellow_pixel() {
+        let mut src: RgbImage = ImageBuffer::new(1, 1);
+        src.put_pixel(0, 0, image::Rgb([240, 210, 40]));
+        let targets = [Rgb(220, 30, 30), Rgb(240, 200, 30)];
+
+        // Yellow target (index 1) wins.
+        assert_eq!(run(&src, &targets, 1).get_pixel(0, 0)[0], 0);
+        assert_eq!(run(&src, &targets, 0).get_pixel(0, 0)[0], 255);
+    }
+
+    /// Neutral dark pixel must still go to black, not to any chromatic
+    /// target — the neutral / chromatic branching must be continuous
+    /// and not produce weird assignments near the L-axis.
+    #[test]
+    fn neutral_dark_pixel_still_goes_to_black() {
+        let mut src: RgbImage = ImageBuffer::new(1, 1);
+        src.put_pixel(0, 0, image::Rgb([20, 20, 20]));
+        let targets = [Rgb(0, 0, 0), Rgb(220, 30, 30)];
+        assert_eq!(run(&src, &targets, 0).get_pixel(0, 0)[0], 0);
+    }
+
+    /// Two palette entries at identical CIE94 distance must never both
+    /// claim the same pixel — that would print as double coverage and
+    /// cause registration bleed on the press.
+    #[test]
+    fn ties_are_broken_by_lower_index() {
+        let mut src: RgbImage = ImageBuffer::new(1, 1);
+        src.put_pixel(0, 0, image::Rgb([128, 128, 128]));
+        // Two identical targets — both are at exactly distance 0 from
+        // the pixel, so the tie-break rule must pick exactly one.
+        let targets = [Rgb(128, 128, 128), Rgb(128, 128, 128)];
+
+        let p0 = run(&src, &targets, 0).get_pixel(0, 0)[0];
+        let p1 = run(&src, &targets, 1).get_pixel(0, 0)[0];
+        // Exactly one plate claims it.
+        assert!(
+            (p0 == 0 && p1 == 255) || (p0 == 255 && p1 == 0),
+            "exactly one plate must claim the pixel, got p0={p0} p1={p1}"
+        );
     }
 }

@@ -29,7 +29,10 @@ pub fn extract(
 
     for (x, y, p) in source.enumerate_pixels() {
         let lab = rgb_to_lab(Rgb(p[0], p[1], p[2]));
-        let d = lab.delta_e(target_lab);
+        // CIE94 so dark shades of the target hue stay inside the
+        // selection instead of getting flushed out by the L-axis
+        // contribution in plain ΔE.
+        let d = lab.delta_e94(target_lab);
         // Normalize distance to [0, 1] using fuzziness as the half-range.
         let t = (d / fuzz).clamp(0.0, 1.0);
         let alpha = 1.0 - apply_falloff(t, falloff);

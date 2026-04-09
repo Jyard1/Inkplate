@@ -144,7 +144,7 @@ fn nearest_palette_index(lab: Lab, palette: &[Lab]) -> usize {
     let mut best = 0usize;
     let mut best_d = f32::INFINITY;
     for (i, &pl) in palette.iter().enumerate() {
-        let d = lab.delta_e(pl);
+        let d = lab.delta_e94(pl);
         if d < best_d {
             best_d = d;
             best = i;

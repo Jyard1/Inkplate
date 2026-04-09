@@ -25,10 +25,13 @@ pub fn show(ui: &mut Ui, state: &mut GuiState) -> Action {
 
     ui.heading("Layers");
     ui.horizontal(|ui| {
-        if ui.button("↑").clicked() {
+        // Plain ASCII labels — the default egui font doesn't ship with
+        // Unicode arrow glyphs, so ↑ / ↓ render as tofu boxes on most
+        // installs. "Move up" / "Move down" is ugly but legible.
+        if ui.button("Move up").clicked() {
             action = Action::MoveUp;
         }
-        if ui.button("↓").clicked() {
+        if ui.button("Move down").clicked() {
             action = Action::MoveDown;
         }
         if ui.button("Delete").clicked() {

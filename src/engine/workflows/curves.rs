@@ -78,6 +78,20 @@ pub const HIGHLIGHT_WHITE: &[CurvePoint] = &[
     CurvePoint::new(255, 255),
 ];
 
+/// Hard-clip underbase for CMYK process on dark shirts. Binarizes
+/// the HSB brightness-inverted mask into solid white ink wherever
+/// the source isn't near-white background. Everything up to ~70%
+/// source brightness gets full ink; a sharp 20-unit transition
+/// clips to no-ink above that. Result is a binary plate, not a
+/// gradient, which is what a screen press actually needs: solid
+/// white everywhere the art lives, no white on the shirt.
+pub const UNDERBASE_SOLID: &[CurvePoint] = &[
+    CurvePoint::new(0, 0),
+    CurvePoint::new(180, 0),
+    CurvePoint::new(200, 255),
+    CurvePoint::new(255, 255),
+];
+
 /// CMYK channel curve — near-identity with a gentle shoulder that
 /// clips very light coverage (below ~6% ink) to zero. Prevents
 /// isolated halftone dots in near-white areas that would read as

@@ -471,6 +471,30 @@ fn extractor_form(
                 changed = true;
             }
         }
+        Extractor::CmykChannel {
+            channel,
+            gcr_strength,
+        } => {
+            ui.label("Channel:");
+            let before = *channel;
+            egui::ComboBox::from_id_salt("cmyk_channel_combo")
+                .selected_text(format!("{before:?}"))
+                .show_ui(ui, |ui| {
+                    use inkplate::engine::layer::CmykProcess;
+                    ui.selectable_value(channel, CmykProcess::Cyan, "Cyan");
+                    ui.selectable_value(channel, CmykProcess::Magenta, "Magenta");
+                    ui.selectable_value(channel, CmykProcess::Yellow, "Yellow");
+                    ui.selectable_value(channel, CmykProcess::Black, "Black");
+                });
+            if *channel != before {
+                changed = true;
+            }
+            let prev = *gcr_strength;
+            labeled_slider_f32(ui, "GCR strength", gcr_strength, 0.0..=1.0);
+            if (*gcr_strength - prev).abs() > 1e-4 {
+                changed = true;
+            }
+        }
         Extractor::ManualPaint { buf } => {
             ui.label(
                 egui::RichText::new(
@@ -519,6 +543,7 @@ enum Tag {
     ChannelCalc,
     LuminanceThreshold,
     IndexAssignment,
+    CmykChannel,
     ManualPaint,
 }
 
@@ -532,6 +557,7 @@ const ALL_EXTRACTOR_TAGS: &[Tag] = &[
     Tag::ChannelCalc,
     Tag::LuminanceThreshold,
     Tag::IndexAssignment,
+    Tag::CmykChannel,
     Tag::ManualPaint,
 ];
 
@@ -546,6 +572,7 @@ fn extractor_tag(e: &Extractor) -> Tag {
         Extractor::ChannelCalc { .. } => Tag::ChannelCalc,
         Extractor::LuminanceThreshold { .. } => Tag::LuminanceThreshold,
         Extractor::IndexAssignment { .. } => Tag::IndexAssignment,
+        Extractor::CmykChannel { .. } => Tag::CmykChannel,
         Extractor::ManualPaint { .. } => Tag::ManualPaint,
     }
 }
@@ -561,6 +588,7 @@ fn extractor_label(t: Tag) -> &'static str {
         Tag::ChannelCalc => "channel_calc",
         Tag::LuminanceThreshold => "luminance_threshold",
         Tag::IndexAssignment => "index_assignment",
+        Tag::CmykChannel => "cmyk_channel",
         Tag::ManualPaint => "manual_paint",
     }
 }
@@ -605,6 +633,10 @@ fn default_extractor(t: Tag, ink: inkplate::engine::color::Rgb) -> Extractor {
             palette: vec![ink],
             index: 0,
             dither: IndexDitherKind::Fs,
+        },
+        Tag::CmykChannel => Extractor::CmykChannel {
+            channel: inkplate::engine::layer::CmykProcess::Cyan,
+            gcr_strength: 0.75,
         },
         Tag::ManualPaint => Extractor::ManualPaint { buf: None },
     }

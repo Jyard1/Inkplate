@@ -137,7 +137,7 @@ impl Lab {
 
 /// Gamma-decode an 8-bit sRGB channel to linear `[0, 1]`.
 #[inline]
-fn srgb_to_linear(c: u8) -> f32 {
+pub(crate) fn srgb_to_linear(c: u8) -> f32 {
     let c = c as f32 / 255.0;
     if c <= 0.040_448 {
         c / 12.92

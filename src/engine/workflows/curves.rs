@@ -77,3 +77,14 @@ pub const HIGHLIGHT_WHITE: &[CurvePoint] = &[
     CurvePoint::new(180, 220),
     CurvePoint::new(255, 255),
 ];
+
+/// CMYK channel curve — near-identity with a gentle shoulder that
+/// clips very light coverage (below ~6% ink) to zero. Prevents
+/// isolated halftone dots in near-white areas that would read as
+/// speckle noise on the print. The user can reshape per-layer.
+pub const CMYK_CHANNEL: &[CurvePoint] = &[
+    CurvePoint::new(0, 0),
+    CurvePoint::new(200, 200),
+    CurvePoint::new(240, 252),
+    CurvePoint::new(255, 255),
+];

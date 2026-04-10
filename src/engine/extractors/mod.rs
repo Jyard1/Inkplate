@@ -25,6 +25,7 @@ use image::{GrayImage, ImageBuffer, Luma, RgbImage};
 use crate::engine::layer::{Extractor, Layer};
 
 pub mod channel_calc;
+pub mod cmyk_channel;
 pub mod color_range;
 pub mod gcr_black;
 pub mod hsb_brightness_inverted;
@@ -98,6 +99,10 @@ pub fn run_extractor(source: &RgbImage, layer: &Layer) -> GrayImage {
         Extractor::LuminanceThreshold { threshold, above } => {
             luminance_threshold::extract(source, *threshold, *above)
         }
+        Extractor::CmykChannel {
+            channel,
+            gcr_strength,
+        } => cmyk_channel::extract(source, *channel, *gcr_strength),
         Extractor::IndexAssignment {
             palette,
             index,

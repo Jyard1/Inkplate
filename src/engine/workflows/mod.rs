@@ -34,6 +34,7 @@ use crate::engine::layer::Layer;
 pub mod auto_detect;
 pub mod black_only;
 pub mod cel_shaded;
+pub mod cmyk_process;
 pub mod curves;
 pub mod duotone;
 pub mod index;
@@ -52,6 +53,8 @@ pub enum Workflow {
     CelShaded,
     SimprocessLight,
     SimprocessDark,
+    CmykProcessLight,
+    CmykProcessDark,
     SingleHalftone,
     BlackOnly,
     Stencil,
@@ -70,6 +73,8 @@ impl Workflow {
             Workflow::CelShaded => "cel_shaded",
             Workflow::SimprocessLight => "simprocess_light",
             Workflow::SimprocessDark => "simprocess_dark",
+            Workflow::CmykProcessLight => "cmyk_process_light",
+            Workflow::CmykProcessDark => "cmyk_process_dark",
             Workflow::SingleHalftone => "single_halftone",
             Workflow::BlackOnly => "black_only",
             Workflow::Stencil => "stencil",
@@ -87,6 +92,8 @@ impl Workflow {
             Workflow::CelShaded => "Cel-shaded",
             Workflow::SimprocessLight => "Sim-process (light shirt)",
             Workflow::SimprocessDark => "Sim-process (dark shirt)",
+            Workflow::CmykProcessLight => "CMYK process (light shirt)",
+            Workflow::CmykProcessDark => "CMYK process (dark shirt)",
             Workflow::SingleHalftone => "Single halftone",
             Workflow::BlackOnly => "Black only",
             Workflow::Stencil => "Stencil",
@@ -103,6 +110,8 @@ impl Workflow {
             Workflow::CelShaded,
             Workflow::SimprocessLight,
             Workflow::SimprocessDark,
+            Workflow::CmykProcessLight,
+            Workflow::CmykProcessDark,
             Workflow::SingleHalftone,
             Workflow::BlackOnly,
             Workflow::Stencil,
@@ -135,6 +144,10 @@ pub struct WorkflowOpts {
     /// raised `max_colors`.
     #[serde(default)]
     pub consolidate_hues: bool,
+    /// GCR (Grey Component Replacement) strength for the CMYK
+    /// workflow. 0.0 = no GCR, 1.0 = full GCR. Default 0.75.
+    #[serde(default = "default_gcr")]
+    pub gcr_strength: f32,
     pub duotone_light: Rgb,
     pub duotone_dark: Rgb,
     pub tritone_highlight: Rgb,
@@ -149,6 +162,7 @@ impl Default for WorkflowOpts {
             fuzziness: 40.0,
             stencil_threshold: 128,
             consolidate_hues: false,
+            gcr_strength: 0.75,
             duotone_light: Rgb(240, 220, 200),
             duotone_dark: Rgb(30, 40, 80),
             tritone_highlight: Rgb(240, 220, 200),
@@ -187,6 +201,18 @@ pub fn run(workflow: Workflow, source: &RgbImage, opts: &WorkflowOpts) -> Vec<La
                 consolidate_hues: opts.consolidate_hues,
             },
         ),
+        Workflow::CmykProcessLight => cmyk_process::build_light(
+            source,
+            cmyk_process::CmykOpts {
+                gcr_strength: opts.gcr_strength,
+            },
+        ),
+        Workflow::CmykProcessDark => cmyk_process::build_dark(
+            source,
+            cmyk_process::CmykOpts {
+                gcr_strength: opts.gcr_strength,
+            },
+        ),
         Workflow::SingleHalftone => single_halftone::build(source),
         Workflow::BlackOnly => black_only::build(source),
         Workflow::Stencil => stencil::build(source, opts.stencil_threshold),
@@ -217,4 +243,8 @@ pub fn auto_run(source: &RgbImage, opts: &WorkflowOpts) -> (Workflow, Vec<Layer>
     let workflow = auto_detect::detect(source);
     let layers = run(workflow, source, opts);
     (workflow, layers)
+}
+
+fn default_gcr() -> f32 {
+    0.75
 }

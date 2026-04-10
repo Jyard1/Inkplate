@@ -85,6 +85,12 @@ pub enum Extractor {
         // and the two can't coexist.
         dither: IndexDitherKind,
     },
+    /// True CMYK channel decomposition: sRGB → linear → CMY with GCR.
+    /// Each layer extracts one of the four process channels.
+    CmykChannel {
+        channel: CmykProcess,
+        gcr_strength: f32,
+    },
     /// User-painted mask. The pipeline returns the [`ManualPaintBuf`]
     /// buffer verbatim (density convention: 0 = ink, 255 = no ink).
     /// The buffer is `None` until the user actually paints something,
@@ -115,6 +121,17 @@ impl ManualPaintBuf {
             pixels: vec![255u8; (width as usize) * (height as usize)],
         }
     }
+}
+
+/// Which of the four CMYK process channels a [`Extractor::CmykChannel`]
+/// layer extracts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CmykProcess {
+    Cyan,
+    Magenta,
+    Yellow,
+    Black,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

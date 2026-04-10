@@ -133,6 +133,19 @@ pub fn show(ui: &mut Ui, state: &mut GuiState) -> Action {
                 &mut state.workflow_opts.fuzziness,
                 1.0..=200.0,
             );
+            // GCR slider — only relevant for CMYK process workflows.
+            if matches!(
+                state.workflow,
+                inkplate::engine::workflows::Workflow::CmykProcessLight
+                    | inkplate::engine::workflows::Workflow::CmykProcessDark
+            ) {
+                labeled_slider_f32(
+                    ui,
+                    "GCR strength",
+                    &mut state.workflow_opts.gcr_strength,
+                    0.0..=1.0,
+                );
+            }
         });
 
         ui.separator();

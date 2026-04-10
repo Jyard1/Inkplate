@@ -125,8 +125,10 @@ pub fn make_halftone(src: &GrayImage, opts: HalftoneOpts) -> GrayImage {
 
             // Average density across all source pixels inside this cell.
             // Single-pixel sampling causes banding in gradients and aliases
-            // fine detail into erratic dot sizes.
-            let half_src = (cell * 0.5).ceil() as i32;
+            // fine detail into erratic dot sizes. Use floor so the averaging
+            // window stays within the cell — ceil at high LPI (small cells)
+            // overshoots and blurs detail across neighboring cells.
+            let half_src = (cell * 0.5).floor().max(1.0) as i32;
             let ax0 = (srcx - half_src).max(0);
             let ay0 = (srcy - half_src).max(0);
             let ax1 = (srcx + half_src).min(w as i32 - 1);

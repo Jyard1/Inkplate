@@ -43,7 +43,7 @@ impl Default for JobOpts {
     fn default() -> Self {
         Self {
             dpi: 300,
-            default_lpi: 55.0,
+            default_lpi: 65.0,
             default_angle_deg: 22.5,
         }
     }

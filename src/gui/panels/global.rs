@@ -91,7 +91,7 @@ pub fn show(ui: &mut Ui, state: &mut GuiState) -> Action {
         ui.vertical(|ui| {
             ui.set_width(140.0);
             let prev = state.job.default_lpi;
-            labeled_slider_f32(ui, "LPI", &mut state.job.default_lpi, 20.0..=120.0);
+            labeled_slider_f32(ui, "LPI", &mut state.job.default_lpi, 20.0..=300.0);
             if (state.job.default_lpi - prev).abs() > 1e-4 {
                 action = Action::JobChanged;
             }

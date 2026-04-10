@@ -90,7 +90,14 @@ pub fn make_halftone(src: &GrayImage, opts: HalftoneOpts) -> GrayImage {
     if w == 0 || h == 0 {
         return src.clone();
     }
-    let cell = (opts.dpi as f32 / opts.lpi.max(1.0)).max(2.0);
+    // Derive effective DPI from the image dimensions, assuming the
+    // longest edge maps to ~13 inches (standard chest print). This
+    // makes LPI meaningful relative to the actual image pixels —
+    // the user's DPI setting only affects export metadata, not the
+    // halftone cell size. Clamped to 72 minimum so tiny images
+    // don't degenerate into noise.
+    let effective_dpi = (w.max(h) as f32 / 13.0).max(72.0);
+    let cell = (effective_dpi / opts.lpi.max(1.0)).max(1.0);
     let ss = opts.supersample.max(1) as f32;
     let ss_w = (w as f32 * ss) as u32;
     let ss_h = (h as f32 * ss) as u32;

@@ -82,11 +82,14 @@ pub fn show(ui: &mut Ui, state: &mut GuiState) -> Action {
     ui.horizontal_wrapped(|ui| {
         ui.vertical(|ui| {
             ui.set_width(140.0);
-            let prev = state.job.dpi;
-            labeled_slider_u32(ui, "DPI", &mut state.job.dpi, 72..=1200);
-            if state.job.dpi != prev {
-                action = Action::JobChanged;
-            }
+            // DPI is derived from image dimensions (longest edge / 13").
+            // Display it as read-only so the user knows what it is.
+            let edpi = state
+                .source
+                .as_ref()
+                .map(|s| (s.width().max(s.height()) as f32 / 13.0).max(72.0) as u32)
+                .unwrap_or(state.job.dpi);
+            ui.label(format!("DPI: {edpi}"));
         });
         ui.vertical(|ui| {
             ui.set_width(140.0);

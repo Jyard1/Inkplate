@@ -62,43 +62,49 @@ pub fn feather_halftone_edge(img: &GrayImage, radius: f32) -> GrayImage {
 }
 
 // ---------------------------------------------------------------------------
-// Low-level box filters
+// Circular (Euclidean distance) filters
 // ---------------------------------------------------------------------------
 
-/// Square max filter with radius `r` (kernel side `2r + 1`). Separable
-/// implementation: horizontal pass, then vertical.
+/// Circular max filter with radius `r`. Uses a precomputed disk mask
+/// so edges erode/dilate smoothly instead of in blocky squares.
 fn max_filter(img: &GrayImage, r: u32) -> GrayImage {
-    let pass1 = separable_pass(img, r, true, true);
-    separable_pass(&pass1, r, false, true)
+    let offsets = disk_offsets(r);
+    apply_filter(img, &offsets, true)
 }
 
 fn min_filter(img: &GrayImage, r: u32) -> GrayImage {
-    let pass1 = separable_pass(img, r, true, false);
-    separable_pass(&pass1, r, false, false)
+    let offsets = disk_offsets(r);
+    apply_filter(img, &offsets, false)
 }
 
-/// One axis of a box min/max filter.
-fn separable_pass(img: &GrayImage, r: u32, horizontal: bool, take_max: bool) -> GrayImage {
+/// Precompute the (dx, dy) offsets within a circle of radius `r`.
+fn disk_offsets(r: u32) -> Vec<(i32, i32)> {
+    let r_i = r as i32;
+    let r_sq = (r_i * r_i) as f32;
+    let mut offsets = Vec::new();
+    for dy in -r_i..=r_i {
+        for dx in -r_i..=r_i {
+            if (dx * dx + dy * dy) as f32 <= r_sq {
+                offsets.push((dx, dy));
+            }
+        }
+    }
+    offsets
+}
+
+fn apply_filter(img: &GrayImage, offsets: &[(i32, i32)], take_max: bool) -> GrayImage {
     let (w, h) = img.dimensions();
     let mut out = ImageBuffer::new(w, h);
-    let r = r as i32;
-
-    let extreme = |a: u8, b: u8| if take_max { a.max(b) } else { a.min(b) };
 
     for y in 0..h {
         for x in 0..w {
             let mut acc: u8 = img.get_pixel(x, y)[0];
-            if horizontal {
-                let x0 = (x as i32 - r).max(0);
-                let x1 = (x as i32 + r).min(w as i32 - 1);
-                for xi in x0..=x1 {
-                    acc = extreme(acc, img.get_pixel(xi as u32, y)[0]);
-                }
-            } else {
-                let y0 = (y as i32 - r).max(0);
-                let y1 = (y as i32 + r).min(h as i32 - 1);
-                for yi in y0..=y1 {
-                    acc = extreme(acc, img.get_pixel(x, yi as u32)[0]);
+            for &(dx, dy) in offsets {
+                let nx = x as i32 + dx;
+                let ny = y as i32 + dy;
+                if nx >= 0 && ny >= 0 && nx < w as i32 && ny < h as i32 {
+                    let v = img.get_pixel(nx as u32, ny as u32)[0];
+                    acc = if take_max { acc.max(v) } else { acc.min(v) };
                 }
             }
             out.put_pixel(x, y, Luma([acc]));
@@ -143,15 +149,20 @@ mod tests {
     #[test]
     fn dilate_expands_ink() {
         // Single dark pixel in the middle of white. Dilate (min filter)
-        // should spread the 0 across a 3×3 region.
+        // with circular kernel spreads 0 to the 4-connected neighbors
+        // (cross pattern), not the full 3×3 square.
         let mut img = ImageBuffer::from_pixel(5, 5, Luma([255]));
         img.put_pixel(2, 2, Luma([0]));
         let out = dilate_ink(&img, 1);
-        for y in 1..=3 {
-            for x in 1..=3 {
-                assert_eq!(out.get_pixel(x, y)[0], 0);
-            }
-        }
+        // Center + 4-connected neighbors should be ink.
+        assert_eq!(out.get_pixel(2, 2)[0], 0);
+        assert_eq!(out.get_pixel(1, 2)[0], 0);
+        assert_eq!(out.get_pixel(3, 2)[0], 0);
+        assert_eq!(out.get_pixel(2, 1)[0], 0);
+        assert_eq!(out.get_pixel(2, 3)[0], 0);
+        // Diagonal corners stay white (distance √2 > radius 1).
+        assert_eq!(out.get_pixel(1, 1)[0], 255);
+        assert_eq!(out.get_pixel(3, 3)[0], 255);
         assert_eq!(out.get_pixel(0, 0)[0], 255);
     }
 

@@ -23,8 +23,11 @@ use std::sync::Arc;
 
 use image::{imageops::FilterType, GrayImage, RgbImage};
 
-use crate::engine::layer::Layer;
-use crate::engine::pipeline::{process_layer, JobOpts};
+use crate::engine::layer::{Extractor, Layer};
+use crate::engine::pipeline::{
+    compute_composite_union, process_layer, process_layer_with_extraction, JobOpts,
+};
+use crate::engine::preprocess;
 
 use super::border::BorderOpts;
 use super::reg_marks::RegMarkOpts;
@@ -75,7 +78,7 @@ pub fn export_layer(
     path: &Path,
     opts: &ExportOpts,
 ) -> anyhow::Result<(u32, u32)> {
-    let resized = resize_source_for_export(source, opts);
+    let resized = preprocess::clamp_near_black(&resize_source_for_export(source, opts), 50);
     let job = JobOpts {
         dpi: opts.dpi,
         default_lpi: opts.lpi.unwrap_or(55.0),
@@ -113,6 +116,10 @@ pub fn export_layer(
 
 /// Export every layer in `layers` to `outdir`, filename template
 /// `{idx:02}_{name}_{hex}.png`. Skips hidden / excluded layers.
+///
+/// Uses two-pass processing so [`Extractor::CompositeUnion`] layers
+/// (underbases) are derived from the union of the other layers'
+/// previews at export resolution.
 pub fn export_all(
     source: &RgbImage,
     layers: &[Layer],
@@ -120,10 +127,68 @@ pub fn export_all(
     opts: &ExportOpts,
 ) -> anyhow::Result<Vec<PathBuf>> {
     std::fs::create_dir_all(outdir)?;
+
+    let resized = preprocess::clamp_near_black(&resize_source_for_export(source, opts), 50);
+    let job = JobOpts {
+        dpi: opts.dpi,
+        default_lpi: opts.lpi.unwrap_or(55.0),
+        default_angle_deg: 22.5,
+    };
+    let fg_ref: Option<&GrayImage> = opts
+        .foreground_mask
+        .as_deref()
+        .filter(|fg| fg.dimensions() == resized.dimensions());
+
+    // Pass 1: process non-CompositeUnion layers, collect previews.
+    let mut previews: Vec<Option<GrayImage>> = vec![None; layers.len()];
+    let mut results: Vec<Option<(image::GrayImage, image::GrayImage)>> =
+        vec![None; layers.len()];
+
+    for (i, layer) in layers.iter().enumerate() {
+        if !layer.visible || !layer.include_in_export {
+            continue;
+        }
+        if matches!(layer.extractor, Extractor::CompositeUnion) {
+            continue;
+        }
+        let processed = process_layer(&resized, layer, job, fg_ref);
+        previews[i] = Some(processed.preview.clone());
+        results[i] = Some((processed.preview, processed.processed));
+    }
+
+    // Pass 2: process CompositeUnion layers from the union.
+    let (w, h) = resized.dimensions();
+    for (i, layer) in layers.iter().enumerate() {
+        if !layer.visible || !layer.include_in_export {
+            continue;
+        }
+        if !matches!(layer.extractor, Extractor::CompositeUnion) {
+            continue;
+        }
+        let union = compute_composite_union(layers, &previews, i, w, h, Some(&resized));
+        let processed = process_layer_with_extraction(union, layer, job, fg_ref);
+        results[i] = Some((processed.preview, processed.processed));
+    }
+
+    // Write PNGs.
     let mut written = Vec::new();
     for (i, layer) in layers.iter().enumerate() {
         if !layer.visible || !layer.include_in_export {
             continue;
+        }
+        let Some((preview, processed_img)) = results[i].take() else {
+            continue;
+        };
+        let mut film = if opts.preview_only {
+            preview
+        } else {
+            processed_img
+        };
+        if let Some(reg) = &opts.reg_marks {
+            super::reg_marks::draw(&mut film, reg);
+        }
+        if let Some(border) = &opts.border {
+            film = super::border::draw(&film, border, layer, i, job.default_lpi);
         }
         let filename = format!(
             "{:02}_{}_{:02x}{:02x}{:02x}.png",
@@ -134,7 +199,7 @@ pub fn export_all(
             layer.ink.2
         );
         let path = outdir.join(&filename);
-        export_layer(source, layer, i, &path, opts)?;
+        write_png_with_dpi(&film, &path, opts.dpi)?;
         written.push(path);
     }
     Ok(written)

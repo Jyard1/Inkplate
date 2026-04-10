@@ -151,19 +151,22 @@ fn underbase_layer() -> Layer {
     let mut layer = Layer::new_spot(Rgb::WHITE);
     layer.name = "underbase".into();
     layer.kind = LayerKind::Underbase;
-    layer.extractor = Extractor::HsbBrightnessInverted {
-        s_curve: 1.6,
-        boost_under_darks: true,
-        boost_strength: 0.4,
-    };
+    // Derive the underbase from the composite of all non-black color
+    // layers. The worker/export resolves this in a two-pass loop:
+    // process color layers first, union their previews, then feed the
+    // union through this layer's pipeline (curve → blur → binarize →
+    // choke → morphology). The result is a clean binary plate that
+    // exactly covers where color ink lands.
+    layer.extractor = Extractor::CompositeUnion;
     layer.tone = Tone {
-        curve: curves::UNDERBASE.to_vec(),
+        curve: curves::UNDERBASE_COMPOSITE.to_vec(),
         density: 1.0,
         choke: 2, // 2-pixel choke so it doesn't peek out from color screens
     };
     layer.render_mode = RenderMode::Solid;
     layer.mask = MaskShape {
-        smooth_radius: 1,
+        noise_open: 2,  // kill stray ink dots outside the boundary
+        holes_close: 2, // fill pinholes inside the solid underbase
         ..MaskShape::default()
     };
     layer

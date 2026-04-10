@@ -131,6 +131,13 @@ pub fn show(ui: &mut Ui, state: &mut GuiState) -> bool {
             egui::CollapsingHeader::new("Mask shape")
                 .default_open(false)
                 .show(ui, |ui| {
+                    if layer.render_mode == inkplate::engine::layer::RenderMode::Solid {
+                        let prev = layer.mask.solid_blur;
+                        labeled_slider_f32(ui, "Solid blur σ", &mut layer.mask.solid_blur, 0.0..=5.0);
+                        if (layer.mask.solid_blur - prev).abs() > 1e-4 {
+                            changed = true;
+                        }
+                    }
                     let prev = layer.mask.smooth_radius;
                     labeled_slider_u32(ui, "Smooth radius", &mut layer.mask.smooth_radius, 0..=10);
                     if layer.mask.smooth_radius != prev {
@@ -523,6 +530,17 @@ fn extractor_form(
                 );
             }
         }
+        Extractor::CompositeUnion => {
+            ui.label(
+                egui::RichText::new(
+                    "Derived from the composite of all non-black color layers. \
+                     Wherever color ink lands, white underbase is placed underneath. \
+                     Adjust with the tone curve, choke, and morphology controls below.",
+                )
+                .italics()
+                .size(11.0),
+            );
+        }
     }
     changed
 }
@@ -545,6 +563,7 @@ enum Tag {
     IndexAssignment,
     CmykChannel,
     ManualPaint,
+    CompositeUnion,
 }
 
 const ALL_EXTRACTOR_TAGS: &[Tag] = &[
@@ -559,6 +578,7 @@ const ALL_EXTRACTOR_TAGS: &[Tag] = &[
     Tag::IndexAssignment,
     Tag::CmykChannel,
     Tag::ManualPaint,
+    Tag::CompositeUnion,
 ];
 
 fn extractor_tag(e: &Extractor) -> Tag {
@@ -574,6 +594,7 @@ fn extractor_tag(e: &Extractor) -> Tag {
         Extractor::IndexAssignment { .. } => Tag::IndexAssignment,
         Extractor::CmykChannel { .. } => Tag::CmykChannel,
         Extractor::ManualPaint { .. } => Tag::ManualPaint,
+        Extractor::CompositeUnion => Tag::CompositeUnion,
     }
 }
 
@@ -590,6 +611,7 @@ fn extractor_label(t: Tag) -> &'static str {
         Tag::IndexAssignment => "index_assignment",
         Tag::CmykChannel => "cmyk_channel",
         Tag::ManualPaint => "manual_paint",
+        Tag::CompositeUnion => "composite_union",
     }
 }
 
@@ -639,6 +661,7 @@ fn default_extractor(t: Tag, ink: inkplate::engine::color::Rgb) -> Extractor {
             gcr_strength: 0.75,
         },
         Tag::ManualPaint => Extractor::ManualPaint { buf: None },
+        Tag::CompositeUnion => Extractor::CompositeUnion,
     }
 }
 

@@ -12,4 +12,6 @@ pub mod project;
 
 pub use engine::color;
 pub use engine::layer::{Layer, RenderMode};
-pub use engine::pipeline::process_layer;
+pub use engine::pipeline::{
+    compute_composite_union, process_layer, process_layer_with_extraction,
+};

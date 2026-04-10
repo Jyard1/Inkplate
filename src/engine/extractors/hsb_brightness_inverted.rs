@@ -52,7 +52,14 @@ pub fn extract(
             // white ink despite their low luminance — plastisol opacity
             // is poor, so the color ink alone can't carry the value on a
             // dark shirt.
-            let dark_boost = saturation * (1.0 - value);
+            //
+            // Brightness gate: near-black pixels (value < 0.10) get no
+            // boost at all, ramping to full boost by value 0.25. Without
+            // this, JPEG noise and anti-aliasing give near-black pixels
+            // a slight color cast → high saturation at low brightness →
+            // massive boost → unwanted underbase under black art.
+            let gate = ((value - 0.10) / 0.15).clamp(0.0, 1.0);
+            let dark_boost = saturation * (1.0 - value) * gate;
             amount = (amount + dark_boost * boost).clamp(0.0, 1.0);
         }
 

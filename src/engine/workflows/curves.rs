@@ -80,15 +80,53 @@ pub const HIGHLIGHT_WHITE: &[CurvePoint] = &[
 
 /// Hard-clip underbase for CMYK process on dark shirts. Binarizes
 /// the HSB brightness-inverted mask into solid white ink wherever
-/// the source isn't near-white background. Everything up to ~70%
-/// source brightness gets full ink; a sharp 20-unit transition
-/// clips to no-ink above that. Result is a binary plate, not a
-/// gradient, which is what a screen press actually needs: solid
-/// white everywhere the art lives, no white on the shirt.
+/// the source has actual art content. The clip is aggressive: only
+/// pixels with density below ~55% (well into the "dark source"
+/// range) get full white ink. This prevents specular highlights,
+/// near-white textures, and anti-aliased edge fragments from
+/// printing as random white speckles on the shirt. Combined with
+/// `noise_open: 2` on the mask, the result is a clean binary plate
+/// with solid fills and no stray dots.
 pub const UNDERBASE_SOLID: &[CurvePoint] = &[
     CurvePoint::new(0, 0),
-    CurvePoint::new(180, 0),
-    CurvePoint::new(200, 255),
+    CurvePoint::new(140, 0),
+    CurvePoint::new(160, 255),
+    CurvePoint::new(255, 255),
+];
+
+/// Underbase for dark shirts (sim-process and CMYK). Much more
+/// permissive than `UNDERBASE_SOLID` — keeps white ink under
+/// everything except near-black source pixels. Dark browns, maroons,
+/// and deep blues all need white underneath or the color ink is
+/// invisible on a dark shirt. Only truly dark pixels (density > ~220,
+/// i.e. source brightness below ~13%) get dropped.
+///
+/// Gradual feathered transition (203→237, 34 units wide) centered
+/// on the density-220 threshold so the effective binarize cutoff
+/// matches the original hard step. The pipeline applies a Gaussian
+/// blur (σ=1.5) after this curve and before binarization, so
+/// isolated noise pixels in the transition zone get averaged into
+/// their neighborhood and fall cleanly on one side of the 128
+/// threshold. The result is clean binary edges with no scattered
+/// dots and correct black handling.
+pub const UNDERBASE_SIM: &[CurvePoint] = &[
+    CurvePoint::new(0, 0),
+    CurvePoint::new(203, 0),
+    CurvePoint::new(237, 255),
+    CurvePoint::new(255, 255),
+];
+
+/// Composite-union underbase curve. The input is the per-pixel min
+/// density across all non-black color layers' previews (0 = at least
+/// one layer has full ink, 255 = no layer has ink). Very permissive:
+/// any pixel with >5% color ink gets full underbase — on a dark shirt
+/// even light color coverage needs white underneath to be visible.
+/// The 15-unit transition zone (235→250) feeds the Gaussian blur so
+/// the edge comes out smooth after binarization.
+pub const UNDERBASE_COMPOSITE: &[CurvePoint] = &[
+    CurvePoint::new(0, 0),
+    CurvePoint::new(235, 0),
+    CurvePoint::new(250, 255),
     CurvePoint::new(255, 255),
 ];
 

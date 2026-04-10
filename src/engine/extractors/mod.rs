@@ -109,6 +109,10 @@ pub fn run_extractor(source: &RgbImage, layer: &Layer) -> GrayImage {
             dither,
         } => index_assignment::extract(source, palette, *index, *dither),
         Extractor::ManualPaint { buf } => manual_paint_mask(source, buf.as_ref()),
+        // CompositeUnion is resolved externally (worker / export two-pass).
+        // If we get here, return blank — the caller should have injected the
+        // union mask via process_layer_with_extraction instead.
+        Extractor::CompositeUnion => blank(source),
     }
 }
 

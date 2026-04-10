@@ -172,6 +172,40 @@ pub fn show(ui: &mut Ui, state: &mut GuiState) -> Action {
                 );
             }
         });
+        ui.separator();
+        ui.vertical(|ui| {
+            ui.set_width(180.0);
+            let prev_threshold = state.clamp_black_threshold;
+            let mut val = state.clamp_black_threshold as u32;
+            let on = val > 0;
+            let mut toggled_on = on;
+            if ui
+                .checkbox(&mut toggled_on, "Clamp near-black")
+                .on_hover_text(
+                    "Force near-black source pixels to pure (0,0,0) before \
+                     extraction. Prevents color channels from picking up \
+                     noise in dark areas.",
+                )
+                .changed()
+            {
+                if toggled_on && val == 0 {
+                    val = 50;
+                } else if !toggled_on {
+                    val = 0;
+                }
+            }
+            let resp = ui.add_enabled(
+                toggled_on,
+                egui::Slider::new(&mut val, 1..=100).text("threshold"),
+            );
+            if resp.changed() && val == 0 {
+                val = 1; // slider min is 1 when enabled
+            }
+            state.clamp_black_threshold = val as u8;
+            if state.clamp_black_threshold != prev_threshold {
+                action = Action::JobChanged;
+            }
+        });
     });
 
     action

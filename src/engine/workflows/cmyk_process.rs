@@ -84,7 +84,7 @@ fn cmyk_layers(opts: CmykOpts) -> Vec<Layer> {
             layer.halftone = HalftoneOverrides {
                 lpi: 0,
                 angle_deg: angle,
-                dot_shape: Some(DotShape::Ellipse),
+                dot_shape: Some(DotShape::Round),
                 curve: HalftoneCurve::Linear,
             };
             layer.mask = MaskShape::default();
@@ -97,33 +97,22 @@ fn underbase_layer() -> Layer {
     let mut layer = Layer::new_spot(Rgb::WHITE);
     layer.name = "white underbase".into();
     layer.kind = LayerKind::Underbase;
-    // HsbBrightnessInverted gives full ink (density 0) where the
-    // source is dark and no ink where it's bright. The hard-clip
-    // tone curve below binarizes this into a solid plate: full
-    // white ink wherever the art has content, no ink on near-white
-    // background areas. The foreground mask (background removal)
-    // further constrains the shape if enabled.
-    layer.extractor = Extractor::HsbBrightnessInverted {
-        s_curve: 1.6,
-        boost_under_darks: true,
-        boost_strength: 0.4,
-    };
+    // Derive the underbase from the composite of all non-black color
+    // layers. The worker/export resolves this in a two-pass loop:
+    // process color layers first, union their previews, then feed the
+    // union through this layer's pipeline (curve → blur → binarize →
+    // choke → morphology). The result is a clean binary plate that
+    // exactly covers where color ink lands.
+    layer.extractor = Extractor::CompositeUnion;
     layer.tone = Tone {
-        // Hard clip: everything up to ~70% brightness → full ink,
-        // sharp transition, near-white → no ink. The result is a
-        // binary mask, not a gradient.
-        curve: curves::UNDERBASE_SOLID.to_vec(),
+        curve: curves::UNDERBASE_COMPOSITE.to_vec(),
         density: 1.0,
-        // 2-pixel choke so the white doesn't peek out from under
-        // the CMYK colour screens on a slightly misregistered press.
         choke: 2,
     };
-    // Solid render — the curve already binarized the mask so there
-    // are no continuous-tone values to halftone. The exported film
-    // is a clean black-or-white plate.
     layer.render_mode = RenderMode::Solid;
     layer.mask = MaskShape {
-        smooth_radius: 1,
+        noise_open: 2,  // kill stray ink dots outside the boundary
+        holes_close: 2, // fill pinholes inside the solid underbase
         ..MaskShape::default()
     };
     layer

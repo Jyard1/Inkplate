@@ -17,8 +17,11 @@ use image::{GrayImage, ImageBuffer, Luma};
 /// Screen angle cycle used by sim-process workflows when the user hasn't
 /// overridden per-layer angles. Taken directly from the Python reference
 /// so output is bit-comparable during the port.
+/// Every consecutive pair is ≥30° apart. First 4 entries match classic
+/// CMYK separations (K, M, C, complement) to minimize moiré between the
+/// layers most likely to overlap.
 pub const HALFTONE_ANGLE_CYCLE: &[f32] = &[
-    45.0, 75.0, 15.0, 0.0, 30.0, 60.0, 105.0, 135.0, 22.5, 67.5, 112.5, 157.5,
+    45.0, 75.0, 15.0, 105.0, 0.0, 60.0, 30.0, 90.0, 22.5, 67.5, 112.5, 157.5,
 ];
 
 /// Return a screen angle for the Nth layer in print order.
@@ -120,10 +123,24 @@ pub fn make_halftone(src: &GrayImage, opts: HalftoneOpts) -> GrayImage {
                 continue;
             }
 
-            // Density at cell center. "density" here is ink coverage in
-            // [0, 1] — invert from our 0=ink convention.
-            let center = src.get_pixel(srcx as u32, srcy as u32)[0];
-            let coverage = shape_curve(1.0 - (center as f32 / 255.0), opts.curve);
+            // Average density across all source pixels inside this cell.
+            // Single-pixel sampling causes banding in gradients and aliases
+            // fine detail into erratic dot sizes.
+            let half_src = (cell * 0.5).ceil() as i32;
+            let ax0 = (srcx - half_src).max(0);
+            let ay0 = (srcy - half_src).max(0);
+            let ax1 = (srcx + half_src).min(w as i32 - 1);
+            let ay1 = (srcy + half_src).min(h as i32 - 1);
+            let mut acc: u32 = 0;
+            let mut count: u32 = 0;
+            for ay in ay0..=ay1 {
+                for ax in ax0..=ax1 {
+                    acc += src.get_pixel(ax as u32, ay as u32)[0] as u32;
+                    count += 1;
+                }
+            }
+            let avg = if count > 0 { acc / count } else { 255 };
+            let coverage = shape_curve(1.0 - (avg as f32 / 255.0), opts.curve);
             if coverage <= 0.001 {
                 continue;
             }

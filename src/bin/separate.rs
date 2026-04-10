@@ -18,7 +18,11 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use inkplate::engine::pipeline::{process_layer, JobOpts};
+use inkplate::engine::layer::Extractor;
+use inkplate::engine::pipeline::{
+    compute_composite_union, process_layer, process_layer_with_extraction, JobOpts,
+};
+use inkplate::engine::preprocess;
 use inkplate::engine::workflows::{auto_run, run, Workflow, WorkflowOpts};
 
 #[derive(Debug, Default)]
@@ -111,13 +115,39 @@ fn main() -> ExitCode {
         workflow.id()
     );
 
-    for layer in &layers {
+    // Clamp near-black source pixels to true black so color extractors
+    // don't report spurious ink for dark areas.
+    let source = preprocess::clamp_near_black(&source, 50);
+
+    // Two-pass: process non-CompositeUnion layers first, then derive
+    // CompositeUnion layers from their previews.
+    let (w, h) = source.dimensions();
+    let mut previews: Vec<Option<image::GrayImage>> = vec![None; layers.len()];
+    let mut results: Vec<Option<(image::GrayImage, image::GrayImage)>> =
+        vec![None; layers.len()];
+
+    for (i, layer) in layers.iter().enumerate() {
+        if matches!(layer.extractor, Extractor::CompositeUnion) {
+            continue;
+        }
         let processed = process_layer(&source, layer, job, None);
-        let image = if args.preview {
-            &processed.preview
-        } else {
-            &processed.processed
+        previews[i] = Some(processed.preview.clone());
+        results[i] = Some((processed.preview, processed.processed));
+    }
+    for (i, layer) in layers.iter().enumerate() {
+        if !matches!(layer.extractor, Extractor::CompositeUnion) {
+            continue;
+        }
+        let union = compute_composite_union(&layers, &previews, i, w, h, Some(&source));
+        let processed = process_layer_with_extraction(union, layer, job, None);
+        results[i] = Some((processed.preview, processed.processed));
+    }
+
+    for (i, layer) in layers.iter().enumerate() {
+        let Some((ref preview, ref processed_img)) = results[i] else {
+            continue;
         };
+        let image = if args.preview { preview } else { processed_img };
         let filename = format!(
             "{:02}_{}_{:02x}{:02x}{:02x}.png",
             layer.print_index,

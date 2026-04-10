@@ -46,6 +46,28 @@ fn swap_bg(img: &RgbImage, fill: Rgb, tolerance: f32) -> RgbImage {
     out
 }
 
+/// Clamp near-black pixels to true (0,0,0). Source images often have
+/// slight color casts in dark areas (JPEG compression, sensor noise,
+/// AI upscaling) that make color extractors report spurious ink —
+/// e.g. yellow sees a (20, 15, 10) pixel as having a warm tint and
+/// outputs a non-zero density, turning what should be black into
+/// grey-brown in the composite. Clamping max(R,G,B) < `threshold`
+/// to pure black before extraction ensures color channels produce
+/// zero ink there while the GCR black plate picks them up correctly.
+pub fn clamp_near_black(img: &RgbImage, threshold: u8) -> RgbImage {
+    let (w, h) = img.dimensions();
+    let mut out = img.clone();
+    for y in 0..h {
+        for x in 0..w {
+            let p = out.get_pixel(x, y).0;
+            if p[0].max(p[1]).max(p[2]) < threshold {
+                out.put_pixel(x, y, image::Rgb([0, 0, 0]));
+            }
+        }
+    }
+    out
+}
+
 /// Strip chroma via LAB L — preserves perceptual brightness exactly. Use
 /// this rather than BT.601 luma for subtle AI-render tints where the
 /// gamma-weighted formula crushes the wrong tones.

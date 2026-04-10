@@ -17,12 +17,12 @@
 //! the expensive step, and it's the one that gets re-run at export DPI
 //! instead of being resampled (resampling halftone dots smudges them).
 //!
-use image::GrayImage;
+use image::{GrayImage, ImageBuffer, Luma};
 
 use crate::engine::extractors::run_extractor;
 use crate::engine::foreground::apply_mask_inplace;
 use crate::engine::halftone::HalftoneOpts;
-use crate::engine::layer::{Layer, RenderMode};
+use crate::engine::layer::{Layer, LayerKind, RenderMode};
 use crate::engine::{dither, halftone, morphology, tone};
 
 /// Result of running one layer through the pipeline.
@@ -62,8 +62,21 @@ pub fn process_layer(
     job: JobOpts,
     foreground_mask: Option<&GrayImage>,
 ) -> ProcessedLayer {
-    // 1. Extract the raw density map via the 9-extractor dispatch.
-    let mut mask = run_extractor(source, layer);
+    // 1. Extract the raw density map via the extractor dispatch.
+    let mask = run_extractor(source, layer);
+    process_layer_with_extraction(mask, layer, job, foreground_mask)
+}
+
+/// Run the pipeline from step 2 onward using a pre-computed extraction
+/// mask. Used by the two-pass CompositeUnion flow where the "extraction"
+/// is the union of sibling layers' previews rather than an extractor call.
+pub fn process_layer_with_extraction(
+    mask: GrayImage,
+    layer: &Layer,
+    job: JobOpts,
+    foreground_mask: Option<&GrayImage>,
+) -> ProcessedLayer {
+    let mut mask = mask;
 
     // 2. Invert if the layer flag says so.
     if layer.mask.invert {
@@ -80,6 +93,25 @@ pub fn process_layer(
     // 4. Density multiplier.
     if (layer.tone.density - 1.0).abs() > 1e-4 {
         mask = tone::apply_density(&mask, layer.tone.density);
+    }
+
+    // 4.5. Solid layers: Gaussian blur → binarize.
+    // The gradual tone curve produces a transition zone with gray
+    // values. Source noise causes random pixels in this zone to
+    // scatter across the 128 threshold, creating isolated
+    // black/white dots. A small Gaussian blur (σ=1.5) averages each
+    // pixel with its neighbors — isolated noise pixels get absorbed
+    // into the surrounding majority, so they fall cleanly on one
+    // side of the threshold. The subsequent binarize then produces
+    // clean binary edges with no scattered dots. Choke and morphology
+    // (steps 5–6) operate on the clean binary result.
+    if layer.render_mode == RenderMode::Solid {
+        if layer.mask.solid_blur > 0.01 {
+            mask = morphology::smooth_mask(&mask, layer.mask.solid_blur);
+        }
+        for p in mask.iter_mut() {
+            *p = if *p < 128 { 0 } else { 255 };
+        }
     }
 
     // 5. Choke (post-tone erosion).
@@ -126,7 +158,7 @@ pub fn process_layer(
 
     // 7. Render mode.
     let processed = match layer.render_mode {
-        RenderMode::Solid => mask,
+        RenderMode::Solid => mask, // already binarized at step 4.5
         RenderMode::Halftone => {
             let opts = HalftoneOpts {
                 dpi: job.dpi,
@@ -144,15 +176,20 @@ pub fn process_layer(
                 curve: layer.halftone.curve,
                 supersample: 3,
             };
-            halftone::make_halftone(&mask, opts)
+            // Binarize after halftoning: every pixel on the film
+            // must be 100% black (ink) or 100% white (clear). The
+            // supersampled rasterizer produces anti-aliased gray
+            // edges on dots, which looks good on screen but won't
+            // expose screen emulsion correctly — the gray fringe
+            // under-exposes and produces unreliable dot shapes on
+            // the mesh. Threshold at 128 snaps everything to binary.
+            binarize(&halftone::make_halftone(&mask, opts))
         }
-        RenderMode::FmDither => dither::floyd_steinberg_grayscale(&mask),
-        RenderMode::BayerDither => dither::bayer_grayscale(&mask, 8),
-        RenderMode::NoiseDither => dither::white_noise_grayscale(&mask),
-        RenderMode::BlueNoise => dither::blue_noise_grayscale(&mask),
+        RenderMode::FmDither => binarize(&dither::floyd_steinberg_grayscale(&mask)),
+        RenderMode::BayerDither => binarize(&dither::bayer_grayscale(&mask, 8)),
+        RenderMode::NoiseDither => binarize(&dither::white_noise_grayscale(&mask)),
+        RenderMode::BlueNoise => binarize(&dither::blue_noise_grayscale(&mask)),
         RenderMode::IndexFs | RenderMode::IndexBayer => {
-            // Index modes already rasterize inside the extractor; we just
-            // need to binarize here.
             let mut out = mask.clone();
             for p in out.iter_mut() {
                 *p = if *p < 128 { 0 } else { 255 };
@@ -172,4 +209,86 @@ pub fn process_layer(
     }
 
     ProcessedLayer { preview, processed }
+}
+
+/// Compute the composite union mask for a [`CompositeUnion`] layer.
+///
+/// Returns a density map where 0 = "at least one sibling color layer
+/// has ink" and 255 = "no sibling has ink." Skips:
+///
+/// - The layer at `self_idx`
+/// - Layers with `kind == Underbase`
+/// - Layers with near-black ink (R, G, B all < 30)
+/// - Source pixels where max(R,G,B) < 50 (near-black in the source —
+///   color extractors may report spurious ink there due to fuzziness
+///   and JPEG noise, but on a dark shirt the shirt itself is the black)
+pub fn compute_composite_union(
+    layers: &[Layer],
+    previews: &[Option<GrayImage>],
+    self_idx: usize,
+    width: u32,
+    height: u32,
+    source: Option<&image::RgbImage>,
+) -> GrayImage {
+    let mut union: GrayImage = ImageBuffer::from_pixel(width, height, Luma([255u8]));
+
+    for (idx, layer) in layers.iter().enumerate() {
+        if idx == self_idx {
+            continue;
+        }
+        if layer.kind == LayerKind::Underbase {
+            continue;
+        }
+        // Skip near-black inks (black plate doesn't need white under it
+        // on a dark shirt).
+        if layer.ink.0 < 30 && layer.ink.1 < 30 && layer.ink.2 < 30 {
+            continue;
+        }
+
+        if let Some(Some(preview)) = previews.get(idx) {
+            if preview.dimensions() != (width, height) {
+                continue;
+            }
+            // Union: per-pixel MIN of density. Density convention is
+            // 0 = ink, 255 = no ink, so min = "the most ink any layer
+            // wants here."
+            for (dst, src) in union.iter_mut().zip(preview.iter()) {
+                if *src < *dst {
+                    *dst = *src;
+                }
+            }
+        }
+    }
+
+    // Gate by source brightness: if the source pixel is near-black,
+    // force no-underbase. Color extractors (especially yellow) can
+    // report spurious ink for dark source pixels due to fuzziness /
+    // JPEG noise, but on a dark shirt those areas don't need white.
+    if let Some(src) = source {
+        if src.dimensions() == (width, height) {
+            let src_raw = src.as_raw();
+            for (i, dst) in union.iter_mut().enumerate() {
+                let r = src_raw[i * 3];
+                let g = src_raw[i * 3 + 1];
+                let b = src_raw[i * 3 + 2];
+                if r.max(g).max(b) < 50 {
+                    *dst = 255; // no underbase for near-black source
+                }
+            }
+        }
+    }
+
+    union
+}
+
+/// Threshold every pixel to 0 (ink) or 255 (no ink). Screen-print
+/// films are binary — gray pixels won't expose the emulsion
+/// correctly. Called after every halftone / dither render mode.
+fn binarize(img: &GrayImage) -> GrayImage {
+    let (w, h) = img.dimensions();
+    let mut out: GrayImage = ImageBuffer::new(w, h);
+    for (x, y, p) in img.enumerate_pixels() {
+        out.put_pixel(x, y, Luma([if p[0] < 128 { 0 } else { 255 }]));
+    }
+    out
 }

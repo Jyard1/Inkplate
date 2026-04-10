@@ -97,6 +97,13 @@ pub enum Extractor {
     /// at which point the GUI allocates one matching the source
     /// dimensions.
     ManualPaint { buf: Option<ManualPaintBuf> },
+    /// Derive this layer's mask from the union of sibling layers'
+    /// processed previews. The worker/export computes the union in a
+    /// two-pass loop (all other layers first, then this one), skipping
+    /// layers with `kind == Underbase` and layers with near-black ink.
+    /// The result is fed through the normal pipeline (curve, blur,
+    /// binarize, choke, morphology) to produce a clean binary plate.
+    CompositeUnion,
 }
 
 /// Raw stroke buffer for [`Extractor::ManualPaint`].
@@ -185,6 +192,15 @@ pub struct MaskShape {
     pub edge_mode: EdgeMode,
     pub edge_radius: u32,
     pub invert: bool,
+    /// Gaussian blur sigma applied to Solid layers before binarization
+    /// (pipeline step 4.5). Smooths noise at the tone-curve transition
+    /// boundary so the threshold produces clean edges. 0.0 = no blur.
+    #[serde(default = "default_solid_blur")]
+    pub solid_blur: f32,
+}
+
+fn default_solid_blur() -> f32 {
+    1.5
 }
 
 impl Default for MaskShape {
@@ -196,6 +212,7 @@ impl Default for MaskShape {
             edge_mode: EdgeMode::Hard,
             edge_radius: 0,
             invert: false,
+            solid_blur: 1.5,
         }
     }
 }

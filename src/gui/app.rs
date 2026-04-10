@@ -5,7 +5,8 @@
 use std::sync::Arc;
 
 use eframe::egui;
-use inkplate::engine::layer::Layer;
+use inkplate::engine::layer::{Extractor, Layer};
+use inkplate::engine::pipeline::compute_composite_union;
 use inkplate::export::{export_all, BorderOpts, ExportOpts, RegMarkOpts};
 use inkplate::project::{Project, CURRENT_VERSION};
 
@@ -64,17 +65,30 @@ impl eframe::App for InkplateApp {
         // ---- Drain any finished layer results from the worker
         // thread and apply them. Stale results (from before the
         // last structural change to the layer list) are dropped. ----
+        let mut any_non_composite_arrived = false;
         for result in self.worker.drain_results() {
             if result.generation != self.generation {
                 continue;
             }
             if let Some(entry) = self.state.layers.get_mut(result.idx) {
+                // Track whether a non-CompositeUnion layer updated so
+                // we can cascade into any CompositeUnion layers below.
+                if !matches!(entry.layer.extractor, Extractor::CompositeUnion) {
+                    any_non_composite_arrived = true;
+                }
                 entry.coverage = result.coverage;
                 entry.preview = Some(result.processed.preview);
                 entry.processed = Some(result.processed.processed);
                 self.state.composite_dirty = true;
                 self.textures.invalidate();
             }
+        }
+
+        // ---- Cascade: when a color layer result arrives, any
+        // CompositeUnion layer (underbase) needs to be recomputed
+        // from the updated sibling previews. ----
+        if any_non_composite_arrived {
+            self.resubmit_composite_union_layers();
         }
 
         // ---- Ctrl+Z / Ctrl+Y keyboard shortcuts, handled at the
@@ -269,6 +283,10 @@ impl InkplateApp {
 
     /// Submit a job that reprocesses just one layer. Used for the
     /// "slider moved in the inspector" hot path.
+    ///
+    /// For [`Extractor::CompositeUnion`] layers, computes the union
+    /// from sibling previews on the UI thread (fast) and submits a
+    /// `SingleWithMask` job so the worker doesn't need sibling state.
     fn submit_layer_job(&self, idx: usize) {
         let Some(source) = self.state.source.clone() else {
             return;
@@ -276,16 +294,59 @@ impl InkplateApp {
         let Some(entry) = self.state.layers.get(idx) else {
             return;
         };
-        self.worker.submit(Job {
-            generation: self.generation,
-            kind: JobKind::Single {
+
+        let kind = if matches!(entry.layer.extractor, Extractor::CompositeUnion) {
+            let union = self.compute_composite_union_for(idx);
+            JobKind::SingleWithMask {
                 idx,
                 layer: entry.layer.clone(),
-            },
+                extraction: union,
+            }
+        } else {
+            JobKind::Single {
+                idx,
+                layer: entry.layer.clone(),
+            }
+        };
+
+        self.worker.submit(Job {
+            generation: self.generation,
+            kind,
             source,
             job_opts: self.state.job,
             foreground_mask: self.state.foreground_mask_for_pipeline(),
+            clamp_black_threshold: self.state.clamp_black_threshold,
         });
+    }
+
+    /// Compute the composite union mask for a CompositeUnion layer
+    /// from the current sibling previews in state.
+    fn compute_composite_union_for(&self, cu_idx: usize) -> image::GrayImage {
+        let layers: Vec<_> = self.state.layers.iter().map(|e| e.layer.clone()).collect();
+        let previews: Vec<Option<image::GrayImage>> = self
+            .state
+            .layers
+            .iter()
+            .map(|e| e.preview.clone())
+            .collect();
+        let (w, h) = previews
+            .iter()
+            .flatten()
+            .next()
+            .map(|p| p.dimensions())
+            .unwrap_or((1, 1));
+        let src_ref = self.state.source.as_deref();
+        compute_composite_union(&layers, &previews, cu_idx, w, h, src_ref)
+    }
+
+    /// Resubmit any CompositeUnion layers whose sibling previews have
+    /// changed. Called after applying non-CompositeUnion worker results.
+    fn resubmit_composite_union_layers(&self) {
+        for (idx, entry) in self.state.layers.iter().enumerate() {
+            if matches!(entry.layer.extractor, Extractor::CompositeUnion) {
+                self.submit_layer_job(idx);
+            }
+        }
     }
 
     /// Submit a job that reprocesses every layer. Used after a
@@ -309,6 +370,7 @@ impl InkplateApp {
             source,
             job_opts: self.state.job,
             foreground_mask: self.state.foreground_mask_for_pipeline(),
+            clamp_black_threshold: self.state.clamp_black_threshold,
         });
     }
 

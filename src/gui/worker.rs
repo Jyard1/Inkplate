@@ -31,8 +31,11 @@ use std::thread;
 
 use eframe::egui;
 use image::{GrayImage, RgbImage};
-use inkplate::engine::layer::Layer;
-use inkplate::engine::pipeline::{process_layer, JobOpts, ProcessedLayer};
+use inkplate::engine::layer::{Extractor, Layer};
+use inkplate::engine::pipeline::{
+    compute_composite_union, process_layer, process_layer_with_extraction, JobOpts, ProcessedLayer,
+};
+use inkplate::engine::preprocess;
 
 /// A single pending job for the worker thread.
 pub struct Job {
@@ -41,6 +44,9 @@ pub struct Job {
     pub source: Arc<RgbImage>,
     pub job_opts: JobOpts,
     pub foreground_mask: Option<Arc<GrayImage>>,
+    /// Clamp near-black source pixels to (0,0,0) before extraction.
+    /// 0 = off, N = clamp pixels with max(R,G,B) < N.
+    pub clamp_black_threshold: u8,
 }
 
 /// What the worker should actually process on this job.
@@ -48,6 +54,14 @@ pub enum JobKind {
     /// Reprocess one layer only (the common case after a slider
     /// tweak in the inspector).
     Single { idx: usize, layer: Layer },
+    /// Reprocess one layer using a pre-computed extraction mask.
+    /// Used for [`Extractor::CompositeUnion`] layers where the UI
+    /// thread has already computed the union from sibling previews.
+    SingleWithMask {
+        idx: usize,
+        layer: Layer,
+        extraction: GrayImage,
+    },
     /// Reprocess every layer in order. Used on job opts changes
     /// (DPI / LPI) and background-mask rebuilds.
     All { layers: Vec<Layer> },
@@ -127,10 +141,37 @@ fn worker_loop(
             continue;
         };
 
+        // Optionally clamp near-black source pixels to true (0,0,0)
+        // so color extractors don't report spurious ink for dark areas.
+        let source: Arc<RgbImage> = if job.clamp_black_threshold > 0 {
+            Arc::new(preprocess::clamp_near_black(&job.source, job.clamp_black_threshold))
+        } else {
+            job.source.clone()
+        };
+
         match job.kind {
             JobKind::Single { idx, layer } => {
                 let processed = process_layer(
-                    &job.source,
+                    &source,
+                    &layer,
+                    job.job_opts,
+                    job.foreground_mask.as_deref(),
+                );
+                let coverage = coverage_fraction(&processed.preview);
+                let _ = results.send(LayerResult {
+                    generation: job.generation,
+                    idx,
+                    processed,
+                    coverage,
+                });
+            }
+            JobKind::SingleWithMask {
+                idx,
+                layer,
+                extraction,
+            } => {
+                let processed = process_layer_with_extraction(
+                    extraction,
                     &layer,
                     job.job_opts,
                     job.foreground_mask.as_deref(),
@@ -144,7 +185,17 @@ fn worker_loop(
                 });
             }
             JobKind::All { layers } => {
+                // Two-pass processing for CompositeUnion layers.
+                // Pass 1: process all non-CompositeUnion layers and
+                // collect their previews.
+                let fg = job.foreground_mask.as_deref();
+                let mut previews: Vec<Option<GrayImage>> = vec![None; layers.len()];
+
                 for (idx, layer) in layers.iter().enumerate() {
+                    if matches!(layer.extractor, Extractor::CompositeUnion) {
+                        continue;
+                    }
+
                     // If a newer job has arrived, bail out of the
                     // loop and pick it up on the next iteration.
                     // This is what makes slider drags feel snappy
@@ -159,12 +210,8 @@ fn worker_loop(
                         break;
                     }
 
-                    let processed = process_layer(
-                        &job.source,
-                        layer,
-                        job.job_opts,
-                        job.foreground_mask.as_deref(),
-                    );
+                    let processed = process_layer(&source, layer, job.job_opts, fg);
+                    previews[idx] = Some(processed.preview.clone());
                     let coverage = coverage_fraction(&processed.preview);
                     let _ = results.send(LayerResult {
                         generation: job.generation,
@@ -175,6 +222,37 @@ fn worker_loop(
                     // Wake the UI after every layer so the composite
                     // updates incrementally instead of in one big
                     // burst at the end.
+                    ctx.request_repaint();
+                }
+
+                // Pass 2: process CompositeUnion layers using the
+                // union of pass-1 previews as their extraction mask.
+                let (w, h) = source_dims(&previews);
+                for (idx, layer) in layers.iter().enumerate() {
+                    if !matches!(layer.extractor, Extractor::CompositeUnion) {
+                        continue;
+                    }
+
+                    let superseded = {
+                        let slot = lock.lock().unwrap();
+                        slot.as_ref()
+                            .map(|j| j.generation > job.generation)
+                            .unwrap_or(false)
+                    };
+                    if superseded {
+                        break;
+                    }
+
+                    let union = compute_composite_union(&layers, &previews, idx, w, h, Some(&source));
+                    let processed =
+                        process_layer_with_extraction(union, layer, job.job_opts, fg);
+                    let coverage = coverage_fraction(&processed.preview);
+                    let _ = results.send(LayerResult {
+                        generation: job.generation,
+                        idx,
+                        processed,
+                        coverage,
+                    });
                     ctx.request_repaint();
                 }
             }
@@ -191,4 +269,14 @@ fn coverage_fraction(img: &GrayImage) -> f32 {
     }
     let ink = img.iter().filter(|&&p| p < 128).count() as f32;
     ink / total
+}
+
+/// Find dimensions from the first available preview.
+fn source_dims(previews: &[Option<GrayImage>]) -> (u32, u32) {
+    previews
+        .iter()
+        .flatten()
+        .next()
+        .map(|p| p.dimensions())
+        .unwrap_or((1, 1))
 }

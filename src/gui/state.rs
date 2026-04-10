@@ -124,6 +124,11 @@ pub struct GuiState {
 
     /// Manual-paint brush state for `Extractor::ManualPaint` layers.
     pub brush: BrushState,
+
+    /// Clamp near-black source pixels to pure (0,0,0) before
+    /// extraction so color channels don't report spurious ink in
+    /// dark areas. 0 = off, N = clamp pixels with max(R,G,B) < N.
+    pub clamp_black_threshold: u8,
 }
 
 /// Manual-paint brush settings — size, mode, active state.
@@ -182,6 +187,7 @@ impl Default for GuiState {
             composite_dirty: true,
             viewport: Viewport::default(),
             brush: BrushState::default(),
+            clamp_black_threshold: 50,
         }
     }
 }

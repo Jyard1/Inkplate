@@ -109,6 +109,12 @@ pub fn build(source: &RgbImage, opts: SpotOpts) -> Vec<Layer> {
         layer.tone = Tone::default();
         layer.mask = MaskShape {
             smooth_radius: opts.smooth_radius,
+            // Gaussian blur before binarize. σ=3.5 spreads the mask
+            // over ~7px (2σ), enough to smooth the staircase steps
+            // that diagonal edges produce in the hard Voronoi output.
+            // The binarize threshold then traces a clean diagonal
+            // instead of pixel-aligned blocks.
+            solid_blur: 3.5,
             ..MaskShape::default()
         };
         layers.push(layer);

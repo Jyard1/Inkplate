@@ -1,19 +1,22 @@
-//! Hard Voronoi spot extractor — each pixel lands on exactly one plate.
+//! Soft-edge Voronoi spot extractor — each pixel lands on exactly one
+//! plate, with a smooth gradient at boundaries.
 //!
 //! For every source pixel we compute [`Lab::delta_e94`] (the CIE94
-//! graphic-arts ΔE) against every palette target and paint full ink on
-//! whichever target wins. Ties are broken deterministically by lowest
-//! target index so two palette entries with identical distance can
-//! never both claim the same pixel (which would print as registration
-//! bleed on the press).
+//! graphic-arts ΔE) against every palette target. The winning target
+//! (lowest distance, ties broken by lowest index) claims the pixel.
 //!
-//! No soft ramp, no partial densities: spot plates are solid ink, so
-//! pixels at the boundary between two hues snap hard to one side.
-//! Edge anti-aliasing from the source doesn't translate meaningfully
-//! to a physical screen at print resolution, and any grayscale output
-//! here ends up as translucent ink in the composite preview (which
-//! reads as "blurry") and as grayscale on the film (which a real press
-//! can't reproduce without halftoning).
+//! Instead of outputting hard 0/255, the extractor produces a gradient
+//! at Voronoi boundaries: pixels deep inside a color region get full
+//! ink (0) or full no-ink (255), while pixels near the boundary get
+//! intermediate values based on the distance margin between the
+//! winning and runner-up targets. The pipeline's Gaussian blur then
+//! smooths this gradient, and the binarize step (threshold 128) traces
+//! a clean, non-jagged contour that follows the true color boundary
+//! instead of a pixel-aligned staircase.
+//!
+//! Deterministic tie-breaking (±0.5 density bias toward the Voronoi
+//! winner) guarantees that exactly one plate claims each pixel after
+//! binarization — no double coverage on the press.
 //!
 //! The `aa_full`, `aa_end`, and `aa_reach` fields on [`Params`] are
 //! legacy — kept in the struct so existing saved projects deserialize,
@@ -54,21 +57,37 @@ pub fn extract(source: &RgbImage, params: Params<'_>) -> GrayImage {
             .unwrap_or(0.0)
     };
 
+    // Soft-edge ramp width in ΔE94 units. Within ±RAMP of the Voronoi
+    // boundary, pixels get a gradient instead of a hard 0/255 snap.
+    // The pipeline's Gaussian blur smooths this gradient and the
+    // binarize step (threshold 128) traces a clean contour — no more
+    // staircase aliasing at color boundaries.
+    const RAMP: f32 = 6.0;
+    let scale = 128.0 / RAMP;
+
     for (x, y, p) in source.enumerate_pixels() {
         let lab = rgb_to_lab(Rgb(p[0], p[1], p[2]));
 
-        // Find the single nearest target under CIE94 − weight. Ties
-        // go to the lower index — a `<=` comparison would let both
-        // competing targets claim the pixel and print double-coverage.
+        // Single pass: find the Voronoi winner (for tie-breaking),
+        // our distance, and the closest competing target's distance.
         let mut winner: usize = 0;
-        let mut winner_dist = lab.delta_e94(target_labs[0]) - weight_of(0);
-        for (i, &tl) in target_labs.iter().enumerate().skip(1) {
+        let mut winner_dist = f32::MAX;
+        let mut d_self = f32::MAX;
+        let mut d_best_other = f32::MAX;
+
+        for (i, &tl) in target_labs.iter().enumerate() {
             let d = lab.delta_e94(tl) - weight_of(i);
             if d < winner_dist {
                 winner = i;
                 winner_dist = d;
             }
+            if i == params.target_index {
+                d_self = d;
+            } else if d < d_best_other {
+                d_best_other = d;
+            }
         }
+
         // "Others" are colors we explicitly do not want to claim. If
         // one of them is strictly closer than the winning target, no
         // plate gets this pixel.
@@ -76,10 +95,22 @@ pub fn extract(source: &RgbImage, params: Params<'_>) -> GrayImage {
             .iter()
             .any(|&ol| lab.delta_e94(ol) < winner_dist);
 
-        let density = if !rejected && winner == params.target_index {
-            0u8
-        } else {
+        let density = if rejected {
             255u8
+        } else {
+            // margin > 0 → inside our territory (we beat competitors)
+            // margin = 0 → exactly on the Voronoi boundary
+            // margin < 0 → outside our territory
+            let margin = d_best_other - d_self;
+            let raw = 128.0 - margin * scale;
+            // ±0.5 bias ensures the Voronoi winner (lowest index at
+            // equal distance) always claims the pixel, preventing
+            // double coverage on the press.
+            if winner == params.target_index {
+                (raw - 0.5).clamp(0.0, 255.0) as u8
+            } else {
+                (raw + 0.5).clamp(0.0, 255.0) as u8
+            }
         };
         out.put_pixel(x, y, Luma([density]));
     }
@@ -205,15 +236,24 @@ mod tests {
                 target_weights: Some(&weights),
             },
         );
-        // Target 0 loses the pixel once target 1's weight is high.
-        assert_eq!(baseline_pixel, 0);
+        // Without weights the two targets are equidistant, so the
+        // lower-index winner gets density < 128 (ink after binarize)
+        // via the soft-edge gradient. With heavy bias on target 1 the
+        // margins are enormous, so the outputs saturate to 0/255.
+        assert!(
+            baseline_pixel < 128,
+            "lower index should win equidistant tie, got {baseline_pixel}"
+        );
         assert_eq!(biased_0.get_pixel(0, 0)[0], 255);
         assert_eq!(biased_1.get_pixel(0, 0)[0], 0);
     }
 
     /// Two palette entries at identical CIE94 distance must never both
     /// claim the same pixel — that would print as double coverage and
-    /// cause registration bleed on the press.
+    /// cause registration bleed on the press. With soft-edge output the
+    /// densities are no longer hard 0/255, but exactly one must be
+    /// below the binarize threshold (128 → ink) and the other at or
+    /// above it (no ink).
     #[test]
     fn ties_are_broken_by_lower_index() {
         let mut src: RgbImage = ImageBuffer::new(1, 1);
@@ -224,10 +264,10 @@ mod tests {
 
         let p0 = run(&src, &targets, 0).get_pixel(0, 0)[0];
         let p1 = run(&src, &targets, 1).get_pixel(0, 0)[0];
-        // Exactly one plate claims it.
+        // Exactly one plate claims it (< 128 = ink after binarize).
         assert!(
-            (p0 == 0 && p1 == 255) || (p0 == 255 && p1 == 0),
-            "exactly one plate must claim the pixel, got p0={p0} p1={p1}"
+            (p0 < 128 && p1 >= 128) || (p0 >= 128 && p1 < 128),
+            "exactly one plate must claim the pixel (< 128 = ink), got p0={p0} p1={p1}"
         );
     }
 }

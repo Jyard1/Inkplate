@@ -149,8 +149,17 @@ pub fn make_halftone(src: &GrayImage, opts: HalftoneOpts) -> GrayImage {
                 }
             }
             let avg = if count > 0 { acc / count } else { 255 };
+            // Near-white clamp: JPEG noise, anti-aliased edges, and
+            // softly-graded source art push cell averages up by a few
+            // density points even in "empty" background areas. Drawing
+            // those tiny dots tiles into a faint repeating pattern
+            // across the whole film. Clamp cells that are effectively
+            // white to no-dot so backgrounds stay clean.
+            if avg >= 248 {
+                continue;
+            }
             let coverage = shape_curve(1.0 - (avg as f32 / 255.0), opts.curve);
-            if coverage <= 0.001 {
+            if coverage <= 0.01 {
                 continue;
             }
 
